@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JOY 3D 编辑器</title>
+    <link rel="stylesheet" href="/three-editor/style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <div class="toolbar">
+        <h1>JOY 3D 编辑器</h1>
+        <div class="toolbar-actions">
+          <input id="upload-model" type="file" accept=".glb,.gltf,.fbx" class="btn btn-outline" />
+          <button id="screenshot-btn" class="btn btn-secondary">截屏</button>
+          <button id="render-btn" class="btn btn-primary">高清渲染</button>
+        </div>
+      </div>
+
+      <!-- 预审模型相片墙 + 灯光控制：并排布局 -->
+      <div class="approved-row">
+        <div id="approved-grid" class="approved-grid" aria-label="预审模型相片墙">
+          <!-- 由 main.js 动态填充 -->
+        </div>
+        <div class="panel-section light-control">
+          <h3>灯光对比</h3>
+          <div class="light-buttons">
+            <button id="contrast-strong" class="btn btn-light-control btn-primary">强对比</button>
+            <button id="contrast-normal" class="btn btn-light-control btn-secondary">常规</button>
+            <button id="contrast-weak" class="btn btn-light-control btn-outline">弱对比</button>
+          </div>
+          <div class="hint">环境光：20%/50%/80%</div>
+        </div>
+      </div>
+
+      <div class="main-content">
+        <div class="render-area">
+          <canvas id="canvas"></canvas>
+          <div id="loading" class="loading" style="display:none;">
+            <div class="spinner"></div>
+            <div style="margin-top:8px; font-size:14px;">正在高质量渲染...</div>
+          </div>
+          <div id="render-info" class="render-info">FPS: --</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="render-modal" class="modal" style="display:none;">
+      <div class="modal-content">
+        <div class="modal-header">
+          <div>高清渲染设置</div>
+          <button id="modal-close-btn" class="modal-close" onclick="document.getElementById('render-modal').style.display='none'">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="setting-group">
+            <label>分辨率</label>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <input id="render-width" type="number" value="1920" style="width:120px;" />
+              ×
+              <input id="render-height" type="number" value="1080" style="width:120px;" />
+              <label style="margin-left:8px; display:flex; align-items:center; gap:6px;">
+                <input id="keep-aspect-ratio" type="checkbox" checked /> 保持比例
+              </label>
+            </div>
+            <div class="hint">建议使用 16:9 或 1:1，支持超采样</div>
+          </div>
+          <div class="setting-group">
+            <label>超采样（抗锯齿）</label>
+            <select id="supersample" style="width:140px;">
+              <option value="1">关闭（1x）</option>
+              <option value="2" selected>2x</option>
+              <option value="4">4x</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label>焦段（镜头）</label>
+            <select id="lens-mm" style="width:140px;">
+              <option value="">默认（保持当前视角）</option>
+              <option value="35">35mm</option>
+              <option value="80">80mm</option>
+              <option value="200" selected>200mm</option>
+              <option value="350">350mm</option>
+            </select>
+            <div class="hint">渲染时按指定焦段调整相机，同时自动保持角色在屏幕中的大小恒定。</div>
+          </div>
+          <div class="setting-group">
+            <label>格式</label>
+            <select id="render-format" style="width:140px;">
+              <option value="png" selected>PNG</option>
+              <option value="jpeg">JPEG</option>
+            </select>
+            <div style="margin-top:8px; display:flex; align-items:center; gap:6px;">
+              <label>JPEG质量</label>
+              <input id="jpeg-quality" type="range" min="0.1" max="1" step="0.01" value="0.92" style="flex:1;" />
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="cancel-render-btn" class="btn btn-outline" onclick="document.getElementById('render-modal').style.display='none'">取消</button>
+          <button id="start-render-btn" class="btn btn-primary">开始渲染</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Import map to resolve bare 'three' specifier used by JSM modules -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.159.0/build/three.module.js"
+        }
+      }
+    </script>
+    <!-- Switch to ES Modules for three.js and editor script -->
+    <script type="module" src="/three-editor/main.js"></script>
+  </body>
+  </html>
