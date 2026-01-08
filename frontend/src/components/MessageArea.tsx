@@ -31,15 +31,15 @@ interface MessageAreaProps {
   customContent?: React.ReactNode
 }
 
-export default function MessageArea({ 
-  messages, 
-  scrollContainerRef, 
-  hoveredImage, 
-  setHoveredImage, 
-  handleImageClick, 
-  downloadImage, 
-  isLoading = false, 
-  showComplianceMsg = false, 
+export default function MessageArea({
+  messages,
+  scrollContainerRef,
+  hoveredImage,
+  setHoveredImage,
+  handleImageClick,
+  downloadImage,
+  isLoading = false,
+  showComplianceMsg = false,
   bottomActions,
   queueInfo,
   onCancelJob,
@@ -130,7 +130,7 @@ export default function MessageArea({
           <div className="my-4">
             <h3 className="text-sm text-muted-foreground mb-2">正在生成</h3>
             <div className="grid grid-cols-4 gap-4">
-              {[1,2,3,4].map(i => (
+              {[1, 2, 3, 4].map(i => (
                 <div key={i} className="h-40 rounded-md bg-gradient-to-br from-purple-300/40 to-purple-500/40 animate-pulse" />
               ))}
             </div>
@@ -153,6 +153,8 @@ export default function MessageArea({
             </button>
           </div>
         )}
+        {/* 底部占位，确保滚动到底部时内容不被遮挡 */}
+        <div className="h-32" />
       </div>
     </div>
   )

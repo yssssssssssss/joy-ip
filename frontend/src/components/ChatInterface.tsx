@@ -10,6 +10,7 @@ import ChatHeader from './ChatHeader'
 import MessageArea from './MessageArea'
 import ChatInput from './ChatInput'
 import AnalysisPreview, { AnalysisResult } from './AnalysisPreview'
+import NoticeModal from './NoticeModal'
 
 
 // 队列状态类型
@@ -592,7 +593,20 @@ export default function ChatInterface() {
     if (typeof window !== 'undefined') {
       saveScrollPos(getRouteKey(), currentScrollTop)
     }
-    router.push(`/detail?image=${encodeURIComponent(imageUrl)}`, { scroll: false })
+
+    // 对于 base64 图片，使用 sessionStorage 传递以避免 URL 过长
+    if (imageUrl.startsWith('data:')) {
+      try {
+        sessionStorage.setItem('pending_detail_image', imageUrl)
+        router.push('/detail?image=pending', { scroll: false })
+      } catch (e) {
+        console.error('存储图片失败:', e)
+        // 如果存储失败，尝试直接跳转（可能会失败）
+        router.push(`/detail?image=${encodeURIComponent(imageUrl)}`, { scroll: false })
+      }
+    } else {
+      router.push(`/detail?image=${encodeURIComponent(imageUrl)}`, { scroll: false })
+    }
   }
 
   useEffect(() => {
@@ -848,6 +862,8 @@ export default function ChatInterface() {
           </>
         )}
       </div>
+      {/* 2D/3D 模式切换提示 */}
+      <NoticeModal />
     </div>
   )
 }

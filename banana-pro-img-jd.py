@@ -3,7 +3,8 @@ import json
 import base64
 import time
 from pathlib import Path
-from prompt_templates import get_system_prompt, get_accessory_instruction, get_constraints
+# 导入2D/3D统一接口
+from prompt_templates_2d import get_system_prompt, get_accessory_instruction, get_constraints
 
 # 尝试导入带重试机制的http_client
 try:
@@ -140,7 +141,7 @@ def extract_generated_image_base64(resp_json: dict) -> str | None:
     return None
 
 
-def generate_image_with_accessories(image_path, accessories_info, style="default"):
+def generate_image_with_accessories(image_path, accessories_info, style="default", mode="3d"):
     """
     统一的配件生成接口，兼容原有的三个模块接口
     
@@ -148,6 +149,7 @@ def generate_image_with_accessories(image_path, accessories_info, style="default
         image_path: 输入图片路径
         accessories_info: 配件信息（可以是服装、手拿、头戴的组合描述）
         style: prompt风格 ("default", "professional", "simple")
+        mode: 模式 ("2d" 或 "3d")，决定使用哪套模板
         
     Returns:
         str: 生成的图片路径（格式：/output/xxx.png）或原图片路径（跳过时）
@@ -160,11 +162,11 @@ def generate_image_with_accessories(image_path, accessories_info, style="default
     # 智能检测场景风格
     scene_style = _detect_scene_style(accessories_info)
     
-    # 构建综合prompt
-    prompt = _build_comprehensive_prompt(accessories_info, style, scene_style)
+    # 构建综合prompt（传递mode参数）
+    prompt = _build_comprehensive_prompt(accessories_info, style, scene_style, mode)
     
     # 调试输出：显示生成的prompt
-    print(f"[banana-pro-img-jd] 使用风格: {style}, 场景: {scene_style}")
+    print(f"[banana-pro-img-jd] 使用风格: {style}, 场景: {scene_style}, 模式: {mode.upper()}")
     print(f"[banana-pro-img-jd] 生成的Prompt:")
     print("=" * 50)
     print(prompt)
@@ -226,7 +228,7 @@ def _should_skip_processing(info: str) -> bool:
             return True
     return False
 
-def _build_comprehensive_prompt(accessories_info: str, style="default", scene_style=None) -> str:
+def _build_comprehensive_prompt(accessories_info: str, style="default", scene_style=None, mode="3d") -> str:
     """
     构建综合的prompt，整合服装、手拿、头戴信息
     
@@ -234,18 +236,19 @@ def _build_comprehensive_prompt(accessories_info: str, style="default", scene_st
         accessories_info: 配件信息
         style: 系统提示词风格 ("default", "professional", "simple")
         scene_style: 场景风格 ("formal", "casual", "sports")
+        mode: 模式 ("2d" 或 "3d")，决定使用哪套模板
     """
-    # 获取系统提示词
-    system_prompt = get_system_prompt(style)
+    # 获取系统提示词（传递mode）
+    system_prompt = get_system_prompt(style, mode=mode)
     
     # 解析配件信息
     parsed_accessories = _parse_accessories_info(accessories_info)
     
-    # 构建具体的修改指令
-    modification_instructions = _build_modification_instructions_v2(parsed_accessories)
+    # 构建具体的修改指令（传递mode）
+    modification_instructions = _build_modification_instructions_v2(parsed_accessories, mode)
     
-    # 获取约束条件
-    constraints = get_constraints(style, scene_style)
+    # 获取约束条件（传递mode）
+    constraints = get_constraints(style, scene_style, mode=mode)
     constraints_text = '\n'.join([f"- {constraint}" for constraint in constraints])
     
     # 组合最终prompt
@@ -259,25 +262,29 @@ def _build_comprehensive_prompt(accessories_info: str, style="default", scene_st
     
     return full_prompt
 
-def _build_modification_instructions_v2(accessories: dict) -> str:
+def _build_modification_instructions_v2(accessories: dict, mode="3d") -> str:
     """
     使用模板系统构建修改指令
+    
+    Args:
+        accessories: 解析后的配件字典
+        mode: 模式 ("2d" 或 "3d")
     """
     instructions = []
     
     # 服装处理指令
     if accessories['服装']:
-        instruction = get_accessory_instruction('服装', accessories['服装'])
+        instruction = get_accessory_instruction('服装', accessories['服装'], mode=mode)
         instructions.append(instruction)
     
     # 手拿物品处理指令
     if accessories['手拿']:
-        instruction = get_accessory_instruction('手拿', accessories['手拿'])
+        instruction = get_accessory_instruction('手拿', accessories['手拿'], mode=mode)
         instructions.append(instruction)
     
     # 头戴物品处理指令
     if accessories['头戴']:
-        instruction = get_accessory_instruction('头戴', accessories['头戴'])
+        instruction = get_accessory_instruction('头戴', accessories['头戴'], mode=mode)
         instructions.append(instruction)
     
     # 其他配件处理
@@ -304,10 +311,17 @@ def _parse_accessories_info(accessories_info: str) -> dict:
     # 按逗号分割信息
     parts = accessories_info.split('，')
     
+    # 用于收集服装信息（上装+下装）
+    clothing_parts = []
+    
     for part in parts:
         part = part.strip()
-        if '服装：' in part or '上装：' in part or '下装：' in part:
-            accessories['服装'] = part.split('：', 1)[1] if '：' in part else part
+        if '服装：' in part:
+            clothing_parts.append(part.split('：', 1)[1] if '：' in part else part)
+        elif '上装：' in part:
+            clothing_parts.append(f"上装：{part.split('：', 1)[1]}" if '：' in part else part)
+        elif '下装：' in part:
+            clothing_parts.append(f"下装：{part.split('：', 1)[1]}" if '：' in part else part)
         elif '手拿：' in part or '手持：' in part:
             accessories['手拿'] = part.split('：', 1)[1] if '：' in part else part
         elif '头戴：' in part or '帽子：' in part:
@@ -315,6 +329,10 @@ def _parse_accessories_info(accessories_info: str) -> dict:
         else:
             # 其他未分类的配件信息
             accessories['其他'].append(part)
+    
+    # 合并所有服装信息
+    if clothing_parts:
+        accessories['服装'] = '，'.join(clothing_parts)
     
     return accessories
 

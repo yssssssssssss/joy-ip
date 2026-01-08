@@ -28,8 +28,8 @@ ENABLE_GATE_CHECK = str(os.environ.get("ENABLE_GATE_CHECK", "1")).strip().lower(
 GATE_CHECK_SCOPE = str(os.environ.get("GATE_CHECK_SCOPE", "hats")).strip().lower()
 
 # 并行处理配置
-# 优化：默认启用2个并行worker（避免API限流），可通过环境变量覆盖
-MAX_PARALLEL_WORKERS = int(os.environ.get("MAX_PARALLEL_WORKERS", "2"))
+# 优化：默认启用4个并行worker，可通过环境变量覆盖
+MAX_PARALLEL_WORKERS = int(os.environ.get("MAX_PARALLEL_WORKERS", "4"))
 
 class GenerationController:
     """图片生成流程控制器"""
@@ -71,7 +71,7 @@ class GenerationController:
     def generate_step1_images(self, head_matches: List[Dict], body_matches: List[Dict],
                              output_dir: str = "output") -> List[str]:
         """
-        步骤1：使用per-data.py生成基础组合图片
+        步骤1：使用per-data.py生成基础组合图片（4路并发）
 
         Args:
             head_matches: 头像匹配结果列表
@@ -81,16 +81,16 @@ class GenerationController:
         Returns:
             List[str]: 生成的图片路径列表
         """
-        logger.info("=== 步骤1: 生成基础组合图片 ===")
+        logger.info("=== 步骤1: 生成基础组合图片（4路并发） ===")
 
         if not self.per_data:
             logger.error("per-data模块未加载")
             return []
 
-        generated_images = []
         os.makedirs(output_dir, exist_ok=True)
 
-        # 遍历所有body和head的组合
+        # 构建所有组合任务
+        tasks = []
         for i, body_match in enumerate(body_matches):
             for j, head_match in enumerate(head_matches):
                 body_path = body_match.get('image_path')
@@ -98,32 +98,63 @@ class GenerationController:
                 
                 if not body_path or not head_path:
                     continue
+                if not os.path.exists(body_path) or not os.path.exists(head_path):
+                    continue
                 
-                # 生成输出路径
-                from datetime import datetime
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_path = os.path.join(output_dir, f"step1_{timestamp}_{i}_{j}.png")
-                
+                tasks.append((body_path, head_path, output_dir, i, j))
+        
+        if not tasks:
+            logger.warning("无有效的头身组合任务")
+            return []
+        
+        logger.info(f"共 {len(tasks)} 个拼接任务，使用 {MAX_PARALLEL_WORKERS} 个并行 workers")
+        
+        # 并行处理
+        generated_images = []
+        with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
+            future_to_idx = {
+                executor.submit(self._compose_single_image, *task): idx
+                for idx, task in enumerate(tasks)
+            }
+            
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
                 try:
-                    # 调用per-data.py的compose_images_new_logic函数
-                    result = self.per_data.compose_images_new_logic(
-                        body_path, head_path, output_path
-                    )
-                    
-                    if result and os.path.exists(output_path):
-                        logger.info(f"成功生成图片: {output_path}")
-                        generated_images.append(output_path)
-                    elif isinstance(result, str) and os.path.exists(result):
-                        logger.info(f"成功生成图片: {result}")
+                    result = future.result(timeout=60)
+                    if result:
                         generated_images.append(result)
-                    else:
-                        logger.warning(f"生成图片失败: body={body_path}, head={head_path}")
-                        
+                        logger.info(f"拼接任务 {idx+1}/{len(tasks)} 完成: {result}")
                 except Exception as e:
-                    logger.warning(f"生成图片时发生错误: {str(e)}")
+                    logger.warning(f"拼接任务 {idx+1} 失败: {str(e)}")
         
         logger.info(f"步骤1完成，共生成 {len(generated_images)} 张图片")
         return generated_images
+    
+    def _compose_single_image(self, body_path: str, head_path: str, 
+                               output_dir: str, body_idx: int, head_idx: int) -> Optional[str]:
+        """
+        拼接单张图片（供并行调用）
+        """
+        from datetime import datetime
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        output_path = os.path.join(output_dir, f"step1_{timestamp}_{body_idx}_{head_idx}.png")
+        
+        try:
+            result = self.per_data.compose_images_new_logic(
+                body_path, head_path, output_path
+            )
+            
+            if result and isinstance(result, str) and os.path.exists(result):
+                return result
+            elif result and os.path.exists(output_path):
+                return output_path
+            else:
+                return None
+        except Exception as e:
+            logger.warning(f"拼接图片失败 ({body_path}, {head_path}): {str(e)}")
+            return None
+
     
     def check_image_quality(self, image_path: str, check_type: str) -> bool:
         """

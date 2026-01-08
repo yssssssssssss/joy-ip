@@ -28,6 +28,8 @@ GATE_CHECK_SCOPE = str(os.environ.get("GATE_CHECK_SCOPE", "hats")).strip().lower
 
 # 并行处理配置
 MAX_PARALLEL_WORKERS = int(os.environ.get("MAX_PARALLEL_WORKERS", "2"))
+# 2D 专属并行配置（默认 4，比 3D 更高以提升效率）
+MAX_PARALLEL_WORKERS_2D = int(os.environ.get("MAX_PARALLEL_WORKERS_2D", "4"))
 
 
 class GenerationController2D:
@@ -75,7 +77,7 @@ class GenerationController2D:
     def generate_step1_images(self, head_matches: List[Dict], body_matches: List[Dict],
                                output_dir: str = "output", action_type: str = None) -> List[str]:
         """
-        步骤1：使用per-data-2D.py生成基础组合图片
+        步骤1：使用per-data-2D.py生成基础组合图片（并行处理）
         
         Args:
             head_matches: 头像匹配结果列表
@@ -86,58 +88,82 @@ class GenerationController2D:
         Returns:
             List[str]: 生成的图片路径列表
         """
-        logger.info("=== 步骤1: 2D基础图片生成 ===")
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        logger.info("=== 步骤1: 2D基础图片生成（并行） ===")
         
         if not self.per_data_2d:
             logger.error("per-data-2D模块未加载")
             return []
         
-        generated_images = []
         os.makedirs(output_dir, exist_ok=True)
         
-        # 遍历所有body和head的组合
+        # 构建所有组合任务
+        tasks = []
         for i, body_match in enumerate(body_matches):
             for j, head_match in enumerate(head_matches):
                 body_path = body_match.get('image_path')
                 head_path = head_match.get('image_path')
                 
                 if not body_path or not head_path:
-                    logger.warning(f"缺少图片路径: body={body_path}, head={head_path}")
+                    continue
+                if not os.path.exists(body_path) or not os.path.exists(head_path):
                     continue
                 
-                # 检查文件是否存在
-                if not os.path.exists(body_path):
-                    logger.warning(f"body图片不存在: {body_path}")
-                    continue
-                if not os.path.exists(head_path):
-                    logger.warning(f"head图片不存在: {head_path}")
-                    continue
-                
-                # 生成输出路径
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_path = os.path.join(output_dir, f"2d_step1_{timestamp}_{i}_{j}.png")
-                
+                tasks.append((body_path, head_path, output_dir, action_type, i, j))
+        
+        if not tasks:
+            logger.warning("无有效的头身组合任务")
+            return []
+        
+        logger.info(f"共 {len(tasks)} 个拼接任务，使用 {MAX_PARALLEL_WORKERS_2D} 个并行 workers")
+        
+        # 并行处理
+        generated_images = []
+        with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS_2D) as executor:
+            future_to_idx = {
+                executor.submit(self._compose_single_image, *task): idx
+                for idx, task in enumerate(tasks)
+            }
+            
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
                 try:
-                    # 调用per-data-2D.py的compose_images_new_logic函数
-                    # 注意：这里直接使用单张body和head图片，不是文件夹
-                    result = self.per_data_2d.compose_images_new_logic(
-                        body_path, head_path, output_path, action_type=action_type
-                    )
-                    
-                    if result and isinstance(result, str) and os.path.exists(result):
-                        logger.info(f"成功生成2D图片: {result}")
+                    result = future.result(timeout=60)
+                    if result:
                         generated_images.append(result)
-                    elif result and os.path.exists(output_path):
-                        logger.info(f"成功生成2D图片: {output_path}")
-                        generated_images.append(output_path)
-                    else:
-                        logger.warning(f"生成2D图片失败: body={body_path}, head={head_path}")
-                        
+                        logger.info(f"拼接任务 {idx+1}/{len(tasks)} 完成: {result}")
                 except Exception as e:
-                    logger.warning(f"生成2D图片时发生错误: {str(e)}")
+                    logger.warning(f"拼接任务 {idx+1} 失败: {str(e)}")
         
         logger.info(f"步骤1完成，共生成 {len(generated_images)} 张2D图片")
         return generated_images
+    
+    def _compose_single_image(self, body_path: str, head_path: str, 
+                               output_dir: str, action_type: str,
+                               body_idx: int, head_idx: int) -> Optional[str]:
+        """
+        拼接单张图片（供并行调用）
+        """
+        from datetime import datetime
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        output_path = os.path.join(output_dir, f"2d_step1_{timestamp}_{body_idx}_{head_idx}.png")
+        
+        try:
+            result = self.per_data_2d.compose_images_new_logic(
+                body_path, head_path, output_path, action_type=action_type
+            )
+            
+            if result and isinstance(result, str) and os.path.exists(result):
+                return result
+            elif result and os.path.exists(output_path):
+                return output_path
+            else:
+                return None
+        except Exception as e:
+            logger.warning(f"拼接图片失败 ({body_path}, {head_path}): {str(e)}")
+            return None
     
     def check_image_quality(self, image_path: str, check_type: str) -> bool:
         """
@@ -228,23 +254,24 @@ class GenerationController2D:
             image_paths,
             accessories_info,
             self.banana_unified.generate_image_with_accessories,
-            "2D统一配件"
+            "2D统一配件",
+            mode="2d"  # 2D模式
         )
     
     def _process_accessory_parallel(self, image_paths: List[str], accessory_info: str,
-                                     process_func, accessory_type: str) -> List[str]:
-        """并行处理配饰"""
+                                     process_func, accessory_type: str, mode: str = "3d") -> List[str]:
+        """并行处理配饰（4路并发）"""
         if len(image_paths) <= 1:
-            return self._process_accessory_single(image_paths, accessory_info, process_func, accessory_type)
+            return self._process_accessory_single(image_paths, accessory_info, process_func, accessory_type, mode)
         
-        max_workers = min(MAX_PARALLEL_WORKERS, len(image_paths))
-        logger.info(f"[{accessory_type}] 并行处理 {len(image_paths)} 张图片，workers={max_workers}")
+        max_workers = min(MAX_PARALLEL_WORKERS_2D, len(image_paths))
+        logger.info(f"[{accessory_type}] 并行处理 {len(image_paths)} 张图片，workers={max_workers}, mode={mode}")
         
         results = {}
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_idx = {
-                executor.submit(self._process_single_image, img_path, accessory_info, process_func): idx
+                executor.submit(self._process_single_image, img_path, accessory_info, process_func, mode): idx
                 for idx, img_path in enumerate(image_paths)
             }
             
@@ -262,19 +289,20 @@ class GenerationController2D:
         return [results[i] for i in range(len(image_paths))]
     
     def _process_accessory_single(self, image_paths: List[str], accessory_info: str,
-                                   process_func, accessory_type: str) -> List[str]:
+                                   process_func, accessory_type: str, mode: str = "3d") -> List[str]:
         """串行处理配饰"""
         processed_images = []
         for image_path in image_paths:
-            result = self._process_single_image(image_path, accessory_info, process_func)
+            result = self._process_single_image(image_path, accessory_info, process_func, mode)
             processed_images.append(result if result else image_path)
         return processed_images
     
     def _process_single_image(self, image_path: str, accessory_info: str,
-                               process_func) -> Optional[str]:
+                               process_func, mode: str = "3d") -> Optional[str]:
         """处理单张图片"""
         try:
-            result_url = process_func(image_path, accessory_info)
+            # 传递mode参数
+            result_url = process_func(image_path, accessory_info, mode=mode)
             if result_url:
                 if result_url.startswith('/'):
                     return result_url.lstrip('/')
@@ -347,7 +375,7 @@ class GenerationController2D:
             return False
     
     def final_gate_check(self, image_paths: List[str]) -> List[str]:
-        """最终Gate检查"""
+        """最终Gate检查（4路并发）"""
         def _log(msg: str):
             logger.info(f"[FinalGate2D] {msg}")
             sys.stdout.flush()
@@ -369,6 +397,15 @@ class GenerationController2D:
             _log("Gate 模块未提供 analyze_image_with_three_models，跳过检查")
             return image_paths
         
+        # 单张图片直接检查
+        if len(image_paths) == 1:
+            return self._gate_check_single(image_paths, _log)
+        
+        # 多张图片并行检查
+        return self._gate_check_parallel(image_paths, _log)
+    
+    def _gate_check_single(self, image_paths: List[str], _log) -> List[str]:
+        """串行 Gate 检查（单张图片）"""
         passed_images = []
         for i, image_path in enumerate(image_paths):
             _log(f"检查图片 [{i+1}/{len(image_paths)}]: {image_path}")
@@ -384,6 +421,55 @@ class GenerationController2D:
         
         _log(f"检查完成: {len(passed_images)}/{len(image_paths)} 张图片通过")
         return passed_images
+    
+    def _gate_check_parallel(self, image_paths: List[str], _log) -> List[str]:
+        """并行 Gate 检查（多张图片）"""
+        max_workers = min(MAX_PARALLEL_WORKERS_2D, len(image_paths))
+        _log(f"并行检查 {len(image_paths)} 张图片，workers={max_workers}")
+        
+        results = {}
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {
+                executor.submit(self._check_single_image_gate, img_path): idx
+                for idx, img_path in enumerate(image_paths)
+            }
+            
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                image_path = image_paths[idx]
+                try:
+                    passed, reason = future.result(timeout=60)
+                    results[idx] = (image_path, passed, reason)
+                    status = "✅ 通过" if passed else f"❌ 未通过: {reason}"
+                    _log(f"图片 [{idx+1}/{len(image_paths)}] {status}")
+                except Exception as e:
+                    results[idx] = (image_path, False, str(e))
+                    _log(f"图片 [{idx+1}/{len(image_paths)}] ❌ 检查出错: {str(e)}")
+        
+        passed_images = [
+            results[i][0] for i in range(len(image_paths))
+            if i in results and results[i][1]
+        ]
+        
+        _log(f"检查完成: {len(passed_images)}/{len(image_paths)} 张图片通过")
+        return passed_images
+    
+    def _check_single_image_gate(self, image_path: str) -> tuple:
+        """检查单张图片（供并行调用）"""
+        try:
+            ok, analysis_results = self.gate_check.analyze_image_with_three_models(image_path)
+            if ok:
+                return (True, "")
+            else:
+                try:
+                    models = list(analysis_results.keys())
+                    return (False, f"异常模型: {', '.join(models[:3])}")
+                except Exception:
+                    return (False, "检查未通过")
+        except Exception as e:
+            return (False, str(e))
+
     
     def generate_complete_flow(self, requirement: str, perspective: str = "正视角",
                                 output_dir: str = "output", pre_analysis: Dict = None) -> Dict:
@@ -442,15 +528,15 @@ class GenerationController2D:
             result["logs"].append(result["error"])
             return result
         
-        # 步骤1: 匹配头像和身体
+        # 步骤1: 匹配头像和身体（各选2张，组合生成4张）
         try:
             head_matches, head_logs = self.head_matcher.find_one_best_match_2d(
-                requirement, perspective, top_k=5
+                requirement, perspective, top_k=5, num_select=2
             )
             result["logs"].extend(head_logs)
             
             body_matches, body_logs = self.body_matcher.find_one_best_match_2d(
-                requirement, perspective, top_k=5
+                requirement, perspective, top_k=5, num_select=2
             )
             result["logs"].extend(body_logs)
             

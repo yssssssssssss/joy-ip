@@ -4,11 +4,19 @@ import React, { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { ArrowLeft, Download, Share2, Heart, ZoomIn, ZoomOut } from 'lucide-react'
+import { ArrowLeft, Download, Share2, Heart, ZoomIn, ZoomOut, Upload, Undo2, Check, Brush } from 'lucide-react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { getRouteKey, saveScrollPos } from '@/lib/scrollMemory'
 import AnimatedButton2 from '@/components/button/button2/AnimatedButton2'
 import { useChatState, Message } from '@/app/providers'
+
+// 海报合并的系统级 Prompt（不展示给用户）
+const MERGE_SYSTEM_PROMPT = `
+将图2中的角色复制到图1中的绿色区域，让图2角色的角度和光影质感根据图1进行调整
+`.trim()
+
+// 用户可见的默认 Prompt
+const MERGE_USER_PROMPT = '将图2中的角色，复制到图1中的mask区域'
 
 // 仅客户端渲染的时间，避免 SSR 与客户端格式差异导致 Hydration 问题
 function ClientTime({ locale = 'zh-CN' }: { locale?: string }) {
@@ -31,16 +39,36 @@ function ClientTime({ locale = 'zh-CN' }: { locale?: string }) {
 export default function DetailView() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const imageUrl = searchParams.get('image') || ''
+  const imageUrlParam = searchParams.get('image') || ''
   const { messages, setMessages, persistState, input, selectedPresets } = useChatState()
-  
+
+  // 处理从 sessionStorage 读取的 pending 图片
+  const [currentImage, setCurrentImage] = useState<string>('')
+
+  useEffect(() => {
+    if (imageUrlParam === 'pending') {
+      // 从 sessionStorage 读取图片
+      const pendingImage = sessionStorage.getItem('pending_detail_image')
+      if (pendingImage) {
+        setCurrentImage(pendingImage)
+        // 读取后清除，避免重复
+        sessionStorage.removeItem('pending_detail_image')
+      }
+    } else if (imageUrlParam) {
+      setCurrentImage(imageUrlParam)
+    }
+  }, [imageUrlParam])
+
+  // 使用 currentImage 替代原来的 imageUrl
+  const imageUrl = currentImage
+
   const [scale, setScale] = useState(1)
   const [liked, setLiked] = useState(false)
   const [tagImgUrl, setTagImgUrl] = useState<string>('')
   const [showBgInput, setShowBgInput] = useState(false)
   const [bgText, setBgText] = useState('')
   const [isGenerating, setIsGenerating] = useState(false)
-  const [resultImages, setResultImages] = useState<Array<{url: string, source: string}>>([])
+  const [resultImages, setResultImages] = useState<Array<{ url: string, source: string }>>([])
   const [errorMessage, setErrorMessage] = useState<string>('')
   const [debugInfo, setDebugInfo] = useState<any>(null)
   const [selectedIndex, setSelectedIndex] = useState<number>(0)
@@ -49,6 +77,22 @@ export default function DetailView() {
   const [showAngleDialog, setShowAngleDialog] = useState(false)
   const [applyText, setApplyText] = useState('')
   const [optimizeText, setOptimizeText] = useState('')
+
+  // 海报 Mask 合并模式状态
+  const [showMergeMode, setShowMergeMode] = useState(false)
+  const [posterImage, setPosterImage] = useState<string | null>(null)
+  const [maskData, setMaskData] = useState<string | null>(null)
+  const [visibleCanvasData, setVisibleCanvasData] = useState<string | null>(null)  // 保存可见画布快照（绿色 mask）
+  const [brushSize, setBrushSize] = useState(40)
+  const [mergePrompt, setMergePrompt] = useState('')
+  const [showBrushTools, setShowBrushTools] = useState(false)
+  const [drawHistory, setDrawHistory] = useState<ImageData[]>([])
+  const [isMerging, setIsMerging] = useState(false)
+  const posterCanvasRef = React.useRef<HTMLCanvasElement>(null)
+  const maskCanvasRef = React.useRef<HTMLCanvasElement>(null)
+  const [isDrawing, setIsDrawing] = useState(false)
+  const [posterDimensions, setPosterDimensions] = useState<{ width: number, height: number } | null>(null)
+  const [canvasDisplaySize, setCanvasDisplaySize] = useState<{ width: number, height: number } | null>(null)
 
   // 下载图片
   const downloadImage = async () => {
@@ -86,6 +130,88 @@ export default function DetailView() {
     } catch (error) {
       console.error('下载失败:', error)
     }
+  }
+
+  // 压缩 base64 图片以适配 localStorage 限制
+  const compressImage = async (base64: string, maxWidth: number = 1200): Promise<string> => {
+    return new Promise((resolve) => {
+      const img = new Image()
+      img.onload = () => {
+        let { width, height } = img
+        if (width > maxWidth) {
+          height = Math.floor(height * (maxWidth / width))
+          width = maxWidth
+        }
+        const canvas = document.createElement('canvas')
+        canvas.width = width
+        canvas.height = height
+        const ctx = canvas.getContext('2d')
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height)
+          // 使用 JPEG 格式和较低质量以减小体积
+          resolve(canvas.toDataURL('image/jpeg', 0.8))
+        } else {
+          resolve(base64)
+        }
+      }
+      img.onerror = () => resolve(base64)
+      img.src = base64
+    })
+  }
+
+  // 将绿色 mask 合成到海报图片上
+  const compositeImageWithMask = async (posterBase64: string): Promise<string> => {
+    return new Promise((resolve) => {
+      const posterImg = new Image()
+      posterImg.onload = () => {
+        // 创建输出画布，使用海报的原始尺寸
+        const outputCanvas = document.createElement('canvas')
+        outputCanvas.width = posterImg.width
+        outputCanvas.height = posterImg.height
+        const ctx = outputCanvas.getContext('2d')
+        if (!ctx) {
+          console.error('[合成] 无法获取 canvas context')
+          resolve(posterBase64)
+          return
+        }
+
+        // 1. 绘制原始海报
+        ctx.drawImage(posterImg, 0, 0)
+        console.log('[合成] 已绘制海报，尺寸:', posterImg.width, 'x', posterImg.height)
+
+        // 2. 使用保存的可见画布快照（包含绿色 mask）
+        if (visibleCanvasData) {
+          console.log('[合成] 正在加载保存的画布快照...')
+          const maskImg = new Image()
+          maskImg.onload = () => {
+            console.log('[合成] 画布快照尺寸:', maskImg.width, 'x', maskImg.height)
+            // 将画布快照缩放并绘制到输出画布上
+            ctx.drawImage(
+              maskImg,
+              0, 0, maskImg.width, maskImg.height,    // 源区域
+              0, 0, posterImg.width, posterImg.height  // 目标区域（缩放至海报尺寸）
+            )
+            console.log('[合成] 已绘制绿色 mask')
+            const result = outputCanvas.toDataURL('image/png')
+            console.log('[合成] 合成完成，输出长度:', result.length)
+            resolve(result)
+          }
+          maskImg.onerror = () => {
+            console.error('[合成] 画布快照加载失败')
+            resolve(outputCanvas.toDataURL('image/png'))
+          }
+          maskImg.src = visibleCanvasData
+        } else {
+          console.warn('[合成] 没有保存的画布快照，仅输出海报')
+          resolve(outputCanvas.toDataURL('image/png'))
+        }
+      }
+      posterImg.onerror = (e) => {
+        console.error('[合成] 海报图片加载失败:', e)
+        resolve(posterBase64)
+      }
+      posterImg.src = posterBase64
+    })
   }
 
   // 分享图片
@@ -136,34 +262,34 @@ export default function DetailView() {
         setShowBgInput(true)
         console.debug('根据 URL 参数 showbg=1 自动展开背景输入框')
       }
-    } catch {}
+    } catch { }
   }, [searchParams])
 
   const handleConfirmBackground = async (textOverride?: string) => {
     const finalText = (textOverride ?? bgText).trim()
     if (!finalText) return
-    
+
     setIsGenerating(true)
     setErrorMessage('')
     setDebugInfo(null)
-    
+
     try {
       const payload = { tagImgUrl: tagImgUrl || decodeURIComponent(imageUrl), backgroundText: finalText }
       console.log('发送请求payload:', payload)
-      
+
       const [res1, res2] = await Promise.all([
         fetch('/api/run-jimeng4', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
         fetch('/api/run-banana', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
       ])
-      
+
       console.log('API响应状态:', { jimeng4: res1.status, banana: res2.status })
-      
+
       const d1 = await res1.json()
       const d2 = await res2.json()
-      
+
       console.log('API响应数据:', { jimeng4: d1, banana: d2 })
       setDebugInfo({ jimeng4: d1, banana: d2 })
-      
+
       // 从 stdout 中更稳健地提取各脚本各自生成的图片，避免并发写入目录导致的交叉抓取
       const extractGeneratedUrlsFromStdout = (stdout: string | undefined): string[] => {
         if (!stdout || typeof stdout !== 'string') return []
@@ -199,13 +325,13 @@ export default function DetailView() {
         if (alt1) u1 = alt1
         if (alt2) u2 = alt2
       }
-      
-      const generatedImages: Array<{url: string, source: string}> = []
+
+      const generatedImages: Array<{ url: string, source: string }> = []
       if (u1) generatedImages.push({ url: u1, source: 'Jimeng4' })
       if (u2 && (!u1 || decodeURIComponent(u2) !== decodeURIComponent(u1))) {
         generatedImages.push({ url: u2, source: 'Banana' })
       }
-      
+
       if (generatedImages.length > 0) {
         setResultImages(generatedImages)
         setErrorMessage('')
@@ -494,7 +620,7 @@ export default function DetailView() {
         const idx = imgs.findIndex(u => decodeURIComponent(u) === decoded)
         setSelectedIndex(idx >= 0 ? idx : 0)
       }
-    } catch {}
+    } catch { }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageUrl, messages])
 
@@ -503,9 +629,56 @@ export default function DetailView() {
     return () => {
       try {
         saveScrollPos(getRouteKey(), (typeof window !== 'undefined' ? (window.scrollY || 0) : 0))
-      } catch {}
+      } catch { }
     }
   }, [])
+
+  // 初始化画布尺寸（当海报图片加载后）
+  useEffect(() => {
+    if (!posterImage) return
+
+    const img = new Image()
+    img.onload = () => {
+      // 保存原始尺寸
+      setPosterDimensions({ width: img.width, height: img.height })
+
+      const canvas = posterCanvasRef.current
+      const maskCanvas = maskCanvasRef.current
+      if (canvas && maskCanvas) {
+        // 计算显示尺寸（保持宽高比，最大 800x600）
+        const maxW = 800
+        const maxH = 600
+        let displayW = img.width
+        let displayH = img.height
+
+        // 按比例缩放到容器内
+        if (displayW > maxW || displayH > maxH) {
+          const scaleW = maxW / displayW
+          const scaleH = maxH / displayH
+          const scale = Math.min(scaleW, scaleH)
+          displayW = Math.floor(displayW * scale)
+          displayH = Math.floor(displayH * scale)
+        }
+
+        // 保存显示尺寸
+        setCanvasDisplaySize({ width: displayW, height: displayH })
+
+        // 设置 canvas 实际尺寸（与显示尺寸一致）
+        canvas.width = displayW
+        canvas.height = displayH
+        maskCanvas.width = displayW
+        maskCanvas.height = displayH
+
+        // 初始化 mask 画布为黑色
+        const maskCtx = maskCanvas.getContext('2d')
+        if (maskCtx) {
+          maskCtx.fillStyle = 'black'
+          maskCtx.fillRect(0, 0, displayW, displayH)
+        }
+      }
+    }
+    img.src = posterImage
+  }, [posterImage])
 
   return (
     <div className="flex flex-col h-screen bg-[#1E202C] overflow-hidden">
@@ -576,6 +749,25 @@ export default function DetailView() {
             >
               添加背景
             </Button>
+            <Button
+              variant="ghost"
+              className={`rounded px-3 py-2 ${showMergeMode ? 'bg-green-600 text-white' : 'bg-white/10 text-white'} hover:bg-white/20 transition-colors duration-200`}
+              onClick={() => {
+                setShowMergeMode(v => !v)
+                setShowOptimizeDialog(false)
+                setShowApplyDialog(false)
+                setShowAngleDialog(false)
+                if (!showMergeMode) {
+                  setPosterImage(null)
+                  setMaskData(null)
+                  setMergePrompt('')
+                  setDrawHistory([])
+                  setVisibleCanvasData(null)  // 清除画布快照
+                }
+              }}
+            >
+              合并生成
+            </Button>
             {/* 变换角度按钮隐藏 */}
           </div>
 
@@ -618,7 +810,7 @@ export default function DetailView() {
               {/* 下行：预设按钮（配色与圆角对齐 ChatInput） */}
               <div className="px-6 pb-5">
                 {/* <div className="flex items-center gap-2"> */}
-                  {/* <Button size="sm" variant="outline" className="h-[40px] px-4 rounded-[10px] bg-[#424158] text-[#b7affe] border-0 hover:bg-[#4a4964]">
+                {/* <Button size="sm" variant="outline" className="h-[40px] px-4 rounded-[10px] bg-[#424158] text-[#b7affe] border-0 hover:bg-[#4a4964]">
                     <img src="/icons/head.svg" alt="" className="w-6 h-6 mr-2" />
                     表情
                   </Button>
@@ -704,11 +896,382 @@ export default function DetailView() {
           )}
 
           <div className="min-h-full p-4">
-            {isGenerating ? (
+            {isGenerating || isMerging ? (
               <div className="flex items-center justify-center h-full">
                 <div className="w-[300px] h-[300px] flex items-center justify-center rounded-lg bg-muted animate-pulse">
-                  <span className="text-muted-foreground">生成中...</span>
+                  <span className="text-muted-foreground">{isMerging ? '合并生成中...' : '生成中...'}</span>
                 </div>
+              </div>
+            ) : showMergeMode ? (
+              /* 合并模式：两列布局 */
+              <div className="flex flex-col gap-4">
+                <div className="grid grid-cols-3 gap-4">
+                  {/* 左侧 2/3：海报上传 + Mask 画布 */}
+                  <div className="col-span-2 flex flex-col items-center gap-4">
+                    {!posterImage ? (
+                      <label className="w-full h-[400px] border-2 border-dashed border-white/30 rounded-xl flex flex-col items-center justify-center cursor-pointer hover:border-white/50 transition-colors">
+                        <Upload className="w-12 h-12 text-white/50 mb-4" />
+                        <span className="text-white/70">点击上传海报图</span>
+                        <input
+                          type="file"
+                          className="hidden"
+                          accept="image/*"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0]
+                            if (file) {
+                              const reader = new FileReader()
+                              reader.onload = (ev) => {
+                                setPosterImage(ev.target?.result as string)
+                                setDrawHistory([])
+                                setMaskData(null)
+                                setVisibleCanvasData(null)  // 清除旧的画布快照
+                              }
+                              reader.readAsDataURL(file)
+                            }
+                          }}
+                        />
+                      </label>
+                    ) : (
+                      <div className="relative w-full">
+                        <div
+                          className="relative border border-white/20 rounded-xl overflow-hidden bg-black mx-auto"
+                          style={{
+                            width: canvasDisplaySize ? `${canvasDisplaySize.width}px` : 'auto',
+                            height: canvasDisplaySize ? `${canvasDisplaySize.height}px` : '400px',
+                            maxWidth: '100%'
+                          }}
+                        >
+                          {/* 海报图片 */}
+                          <img
+                            src={posterImage}
+                            alt="海报"
+                            className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+                          />
+                          {/* 绘图画布 */}
+                          <canvas
+                            ref={posterCanvasRef}
+                            className="absolute inset-0 w-full h-full cursor-crosshair"
+                            style={{ touchAction: 'none' }}
+                            onMouseDown={(e) => {
+                              const canvas = posterCanvasRef.current
+                              const maskCanvas = maskCanvasRef.current
+                              if (!canvas || !maskCanvas) return
+
+                              const ctx = canvas.getContext('2d')
+                              const maskCtx = maskCanvas.getContext('2d')
+                              if (!ctx || !maskCtx) return
+
+                              // 保存当前状态用于回退
+                              const currentState = ctx.getImageData(0, 0, canvas.width, canvas.height)
+                              setDrawHistory(prev => [...prev, currentState])
+
+                              const rect = canvas.getBoundingClientRect()
+                              const scaleX = canvas.width / rect.width
+                              const scaleY = canvas.height / rect.height
+                              const x = (e.clientX - rect.left) * scaleX
+                              const y = (e.clientY - rect.top) * scaleY
+
+                              ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)'
+                              ctx.lineWidth = brushSize
+                              ctx.lineCap = 'round'
+                              ctx.lineJoin = 'round'
+                              ctx.beginPath()
+                              ctx.moveTo(x, y)
+
+                              maskCtx.strokeStyle = 'white'
+                              maskCtx.lineWidth = brushSize
+                              maskCtx.lineCap = 'round'
+                              maskCtx.lineJoin = 'round'
+                              maskCtx.beginPath()
+                              maskCtx.moveTo(x, y)
+
+                              setIsDrawing(true)
+
+                              // 自动填充 Prompt（仅用户可见部分）
+                              if (!mergePrompt) {
+                                setMergePrompt(MERGE_USER_PROMPT)
+                              }
+                            }}
+                            onMouseMove={(e) => {
+                              if (!isDrawing) return
+                              const canvas = posterCanvasRef.current
+                              const maskCanvas = maskCanvasRef.current
+                              if (!canvas || !maskCanvas) return
+
+                              const ctx = canvas.getContext('2d')
+                              const maskCtx = maskCanvas.getContext('2d')
+                              if (!ctx || !maskCtx) return
+
+                              const rect = canvas.getBoundingClientRect()
+                              const scaleX = canvas.width / rect.width
+                              const scaleY = canvas.height / rect.height
+                              const x = (e.clientX - rect.left) * scaleX
+                              const y = (e.clientY - rect.top) * scaleY
+
+                              ctx.lineTo(x, y)
+                              ctx.stroke()
+
+                              maskCtx.lineTo(x, y)
+                              maskCtx.stroke()
+                            }}
+                            onMouseUp={() => {
+                              setIsDrawing(false)
+                              const canvas = posterCanvasRef.current
+                              const maskCanvas = maskCanvasRef.current
+                              if (maskCanvas) {
+                                setMaskData(maskCanvas.toDataURL('image/png'))
+                              }
+                              // 同时保存可见画布快照（包含绿色 mask）
+                              if (canvas) {
+                                setVisibleCanvasData(canvas.toDataURL('image/png'))
+                                console.log('[绘制] 已保存可见画布快照')
+                              }
+                            }}
+                            onMouseLeave={() => {
+                              if (isDrawing) {
+                                setIsDrawing(false)
+                                const canvas = posterCanvasRef.current
+                                const maskCanvas = maskCanvasRef.current
+                                if (maskCanvas) {
+                                  setMaskData(maskCanvas.toDataURL('image/png'))
+                                }
+                                // 同时保存可见画布快照
+                                if (canvas) {
+                                  setVisibleCanvasData(canvas.toDataURL('image/png'))
+                                  console.log('[绘制] 已保存可见画布快照 (离开)')
+                                }
+                              }
+                            }}
+                          />
+                          {/* 隐藏的 Mask 画布 */}
+                          <canvas ref={maskCanvasRef} className="hidden" />
+                        </div>
+                        {/* 删除按钮 */}
+                        <button
+                          className="absolute top-2 right-2 p-2 bg-red-500/80 hover:bg-red-500 text-white rounded-full"
+                          onClick={() => {
+                            setPosterImage(null)
+                            setMaskData(null)
+                            setVisibleCanvasData(null)  // 清除画布快照
+                            setDrawHistory([])
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 右侧 1/3：JoyIP 图片 */}
+                  <div className="col-span-1 flex flex-col items-center gap-2">
+                    <span className="text-xs text-white/50">JoyIP 角色（图2）</span>
+                    {imageUrl && (
+                      <img
+                        src={decodeURIComponent(imageUrl)}
+                        alt="JoyIP"
+                        className="rounded-lg shadow-lg max-w-full max-h-[380px] object-contain border border-white/20"
+                      />
+                    )}
+                  </div>
+                </div>
+
+                {/* 底部工具栏 */}
+                <div className="flex items-center justify-center gap-4 mt-4">
+                  <Button
+                    variant="ghost"
+                    className={`rounded px-4 py-2 ${showBrushTools ? 'bg-green-600 text-white' : 'bg-white/10 text-white'} hover:bg-white/20 transition-colors`}
+                    onClick={() => setShowBrushTools(v => !v)}
+                  >
+                    <Brush className="w-4 h-4 mr-2" />
+                    mask画笔
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="rounded px-4 py-2 bg-white/10 text-white hover:bg-white/20 transition-colors"
+                    disabled={drawHistory.length === 0}
+                    onClick={() => {
+                      const canvas = posterCanvasRef.current
+                      if (!canvas || drawHistory.length === 0) return
+                      const ctx = canvas.getContext('2d')
+                      if (!ctx) return
+                      const prevState = drawHistory[drawHistory.length - 1]
+                      ctx.putImageData(prevState, 0, 0)
+                      setDrawHistory(prev => prev.slice(0, -1))
+                    }}
+                  >
+                    <Undo2 className="w-4 h-4 mr-2" />
+                    回退
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="rounded px-4 py-2 bg-green-600 text-white hover:bg-green-500 transition-colors"
+                    disabled={!posterImage || !maskData || isMerging}
+                    onClick={async () => {
+                      if (!posterImage || !maskData || !imageUrl) return
+                      setIsMerging(true)
+                      try {
+                        const apiUrl = 'https://modelservice.jdcloud.com/v1/images/gemini_flash/generations'
+                        const apiKey = 'pk-a3b4d157-e765-45b9-988a-b8b2a6d7c8bf'
+
+                        // 构建请求
+                        const extractBase64 = (dataUrl: string) => dataUrl.startsWith('data:') ? dataUrl.split(',')[1] : dataUrl
+                        const getMimeType = (dataUrl: string) => {
+                          const match = dataUrl.match(/data:([^;]+);/)
+                          return match ? match[1] : 'image/png'
+                        }
+
+                        // 组合 prompt，添加尺寸要求
+                        const dimensionHint = posterDimensions
+                          ? `输出图像尺寸应为${posterDimensions.width}x${posterDimensions.height}像素。`
+                          : '';
+                        // 只使用 MERGE_SYSTEM_PROMPT
+                        const finalPrompt = `${dimensionHint}${MERGE_SYSTEM_PROMPT}`
+
+                        // 1. 将绿色 mask 合成到海报图片上
+                        const compositedPoster = await compositeImageWithMask(posterImage)
+
+                        // 2. 将合成后的图片保存到服务器
+                        console.log('[合并生成] 正在保存合成图片到服务器...')
+                        const saveResponse = await fetch('/api/save-render', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ dataURL: compositedPoster })
+                        })
+
+                        if (!saveResponse.ok) {
+                          throw new Error('保存合成图片失败')
+                        }
+
+                        const saveResult = await saveResponse.json()
+                        const compositedImageUrl = saveResult.url // 例如: /output/render_20260108_153000.png
+                        console.log('[合并生成] 合成图片已保存:', compositedImageUrl)
+
+                        // 3. 重新从服务器读取合成图片
+                        const compositedImageResponse = await fetch(compositedImageUrl)
+                        const compositedImageBlob = await compositedImageResponse.blob()
+                        const compositedImageBase64 = await new Promise<string>((resolve) => {
+                          const reader = new FileReader()
+                          reader.onload = () => resolve(reader.result as string)
+                          reader.readAsDataURL(compositedImageBlob)
+                        })
+                        console.log('[合并生成] 已重新读取合成图片，长度:', compositedImageBase64.length)
+
+                        const parts = [
+                          { inline_data: { mime_type: 'image/png', data: extractBase64(compositedImageBase64) } },
+                          { inline_data: { mime_type: 'image/png', data: extractBase64(decodeURIComponent(imageUrl).startsWith('data:') ? decodeURIComponent(imageUrl) : await fetch(decodeURIComponent(imageUrl)).then(r => r.blob()).then(b => new Promise<string>((resolve) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result as string); reader.readAsDataURL(b) }))) } },
+                          { text: finalPrompt }
+                        ]
+
+                        const response = await fetch(apiUrl, {
+                          method: 'POST',
+                          headers: {
+                            'Authorization': `Bearer ${apiKey}`,
+                            'Content-Type': 'application/json'
+                          },
+                          body: JSON.stringify({
+                            model: 'Gemini 3-Pro-Image-Preview',
+                            contents: { role: 'USER', parts },
+                            generation_config: {
+                              response_modalities: ['TEXT', 'IMAGE']
+                            },
+                            stream: false
+                          })
+                        })
+
+                        const data = await response.json()
+                        let resultUrl = ''
+                        if (data.candidates?.[0]?.content?.parts) {
+                          const imagePart = data.candidates[0].content.parts.find((p: any) => p.inline_data || p.inlineData)
+                          if (imagePart) {
+                            const inline = imagePart.inline_data || imagePart.inlineData
+                            resultUrl = `data:image/png;base64,${inline.data}`
+                          }
+                        }
+
+                        if (resultUrl) {
+                          setResultImages(prev => [...prev, { url: resultUrl, source: '合并生成' }])
+
+                          // 保存生成结果到 output 文件夹
+                          console.log('[合并生成] 正在保存结果图片到服务器...')
+                          const saveResultResponse = await fetch('/api/save-render', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ dataURL: resultUrl })
+                          })
+                          if (saveResultResponse.ok) {
+                            const saveResultData = await saveResultResponse.json()
+                            console.log('[合并生成] 结果图片已保存:', saveResultData.url)
+                          }
+
+                          // 自动切换到生成结果图
+                          setCurrentImage(resultUrl)
+
+                          // 压缩后保存到主页聊天流
+                          const compressedUrl = await compressImage(resultUrl)
+                          const assistantMessage: Message = {
+                            id: (Date.now() + 1).toString(),
+                            type: 'assistant',
+                            content: `已完成海报合并生成`,
+                            images: [compressedUrl],
+                            timestamp: new Date(),
+                          }
+                          setMessages(prev => {
+                            const updated = [...prev, assistantMessage]
+                            try {
+                              persistState(updated, input, selectedPresets)
+                            } catch (e) {
+                              console.warn('持久化失败，图片可能过大:', e)
+                            }
+                            return updated
+                          })
+
+                          setShowMergeMode(false)
+                          setPosterImage(null)
+                          setMaskData(null)
+                          setDrawHistory([])
+                          setPosterDimensions(null)
+                          setVisibleCanvasData(null)  // 清除画布快照
+                        } else {
+                          setErrorMessage('合并生成失败，未返回图片')
+                        }
+                      } catch (e: any) {
+                        setErrorMessage(`合并生成失败: ${e.message}`)
+                      } finally {
+                        setIsMerging(false)
+                      }
+                    }}
+                  >
+                    <Check className="w-4 h-4 mr-2" />
+                    确认
+                  </Button>
+                </div>
+
+                {/* 画笔工具面板 */}
+                {showBrushTools && (
+                  <div className="mx-auto w-full max-w-[600px] rounded-xl border border-white/15 bg-[#202126] p-4 mt-4">
+                    <div className="flex items-center gap-4">
+                      <span className="text-white/70 text-sm">提示词：</span>
+                      <Input
+                        className="flex-1 h-[40px] bg-[#2b2d33] text-white border-0 placeholder:text-[#8b8fa3] rounded-lg"
+                        placeholder={MERGE_USER_PROMPT}
+                        value={mergePrompt}
+                        onChange={e => setMergePrompt(e.target.value)}
+                      />
+                    </div>
+                    <div className="flex items-center gap-4 mt-4">
+                      <span className="text-white/70 text-sm">笔刷大小：</span>
+                      <input
+                        type="range"
+                        min={20}
+                        max={100}
+                        value={brushSize}
+                        onChange={e => setBrushSize(Number(e.target.value))}
+                        className="flex-1"
+                      />
+                      <span className="text-white text-sm min-w-[50px]">{brushSize}px</span>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="flex flex-col items-center gap-4" style={{ transform: `scale(${scale})`, transformOrigin: 'top center', transition: 'transform 0.3s ease' }}>

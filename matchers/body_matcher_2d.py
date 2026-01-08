@@ -194,7 +194,7 @@ class BodyMatcher2D(BodyMatcher):
     def find_best_matches_2d(self, requirement: str, perspective: str = "正视角",
                               top_k: int = 2, log_callback: Optional[Callable[[str], None]] = None) -> tuple:
         """
-        根据视角和动作类型进行身体匹配
+        根据视角和动作类型进行身体匹配（优先使用缓存）
         
         Args:
             requirement: 用户需求描述
@@ -205,9 +205,12 @@ class BodyMatcher2D(BodyMatcher):
         Returns:
             tuple: (匹配结果列表, 处理日志列表)
         """
+        processing_logs = []
+        
         # 先分析动作类型
         action_type = self.classify_action_type(requirement)
         logger.info(f"识别到动作类型: {action_type}")
+        processing_logs.append(f"识别到动作类型: {action_type}")
         
         # 获取对应的文件夹路径
         folder_path = self.get_body_folder_path(perspective, action_type)
@@ -216,41 +219,88 @@ class BodyMatcher2D(BodyMatcher):
         if not os.path.exists(folder_path):
             log_msg = f"警告：身体路径不存在: {folder_path}"
             logger.warning(log_msg)
+            processing_logs.append(log_msg)
             if log_callback:
                 log_callback(log_msg)
-            return [], [log_msg]
+            return [], processing_logs
         
-        # 使用CLIP进行匹配
+        # 尝试使用 CLIP 缓存
+        try:
+            from utils.clip_cache import get_clip_cache
+            cache = get_clip_cache()
+            
+            if cache.has_cache(folder_path):
+                log_msg = f"使用 CLIP 缓存进行身体检索: {folder_path}"
+                logger.info(log_msg)
+                processing_logs.append(log_msg)
+                if log_callback:
+                    log_callback(log_msg)
+                
+                # 获取文本嵌入
+                self._ensure_clip_model()
+                requirement_features = self.analyze_user_requirement(requirement)
+                action_text = requirement_features.get('整体姿势', '') or requirement
+                action_text_safe = self._truncate_clip_text(action_text)
+                text_emb = self._clip_model_ref.encode([action_text_safe], convert_to_tensor=False, normalize_embeddings=True)
+                
+                # 使用缓存搜索
+                results = cache.search(text_emb[0], folder_path, top_k=top_k)
+                
+                if results:
+                    # 补充完整信息
+                    for r in results:
+                        r['requirement_features'] = requirement_features
+                        r['dimension_scores'] = {dim: r['score'] for dim in self.dimensions}
+                        r['features'] = {dim: "CLIP缓存" for dim in self.dimensions}
+                        r['type'] = 'body'
+                    
+                    names = [r.get('image_name') for r in results]
+                    processing_logs.append(f"身体缓存匹配完成，选择前{top_k}个: {names}")
+                    if log_callback:
+                        log_callback(f"身体缓存匹配完成，选择前{top_k}个: {names}")
+                    
+                    return results, processing_logs
+        except Exception as e:
+            logger.warning(f"CLIP 缓存不可用，回退到原有逻辑: {e}")
+            processing_logs.append(f"CLIP 缓存不可用: {e}")
+        
+        # 回退到原有逻辑
         return self.find_best_matches_from_folder_2d(
             requirement, folder_path, top_k=top_k, log_callback=log_callback
         )
     
     def find_one_best_match_2d(self, requirement: str, perspective: str = "正视角",
-                                top_k: int = 5, log_callback: Optional[Callable[[str], None]] = None) -> tuple:
+                                top_k: int = 5, num_select: int = 2,
+                                log_callback: Optional[Callable[[str], None]] = None) -> tuple:
         """
-        从匹配结果中随机选择一张返回
+        从匹配结果中随机选择num_select张返回
         
         Args:
             requirement: 用户需求描述
             perspective: 视角（正视角/仰视角）
             top_k: 候选数量
+            num_select: 随机选择的数量（默认2张）
             log_callback: 日志回调函数
             
         Returns:
-            tuple: (匹配结果列表（只包含1个）, 处理日志列表)
+            tuple: (匹配结果列表（包含num_select个）, 处理日志列表)
         """
         top_results, logs = self.find_best_matches_2d(requirement, perspective, top_k=top_k, log_callback=log_callback)
         if not top_results:
             return [], logs
         
-        chosen = random.choice(top_results)
-        choose_log = f"从前{top_k}名中随机抽取的图片: {chosen.get('image_name')}"
+        # 从 top_k 中随机选择 num_select 个
+        actual_select = min(num_select, len(top_results))
+        chosen = random.sample(top_results, actual_select)
+        
+        chosen_names = [c.get('image_name') for c in chosen]
+        choose_log = f"从前{top_k}名中随机抽取{actual_select}张图片: {chosen_names}"
         logger.info(choose_log)
         logs.append(choose_log)
         if log_callback:
             log_callback(choose_log)
         
-        return [chosen], logs
+        return chosen, logs
 
 
 if __name__ == "__main__":

@@ -47,13 +47,13 @@ interface ChatInputProps {
   setPerspective?: (perspective: string) => void
 }
 
-export default function ChatInput({ 
-  input, 
-  setInput, 
-  handleSend, 
-  isLoading, 
-  insertPreset, 
-  variant = 'bottom', 
+export default function ChatInput({
+  input,
+  setInput,
+  handleSend,
+  isLoading,
+  insertPreset,
+  variant = 'bottom',
   onOpenThreeTest,
   generationMode = '3D',
   setGenerationMode,
@@ -68,21 +68,19 @@ export default function ChatInput({
     <div className="flex items-center gap-1 bg-[#2b2d33] rounded-[12px] p-1">
       <button
         onClick={() => setGenerationMode?.('2D')}
-        className={`px-4 py-2 rounded-[10px] text-sm font-medium transition-all duration-200 ${
-          is2DMode 
-            ? 'bg-gradient-to-r from-[#d580ff] to-[#a6ccfd] text-white shadow-lg' 
-            : 'text-gray-400 hover:text-white hover:bg-white/10'
-        }`}
+        className={`px-4 py-2 rounded-[10px] text-sm font-medium transition-all duration-200 ${is2DMode
+          ? 'bg-gradient-to-r from-[#d580ff] to-[#a6ccfd] text-white shadow-lg'
+          : 'text-gray-400 hover:text-white hover:bg-white/10'
+          }`}
       >
         2D素材生成
       </button>
       <button
         onClick={() => setGenerationMode?.('3D')}
-        className={`px-4 py-2 rounded-[10px] text-sm font-medium transition-all duration-200 ${
-          !is2DMode 
-            ? 'bg-gradient-to-r from-[#d580ff] to-[#a6ccfd] text-white shadow-lg' 
-            : 'text-gray-400 hover:text-white hover:bg-white/10'
-        }`}
+        className={`px-4 py-2 rounded-[10px] text-sm font-medium transition-all duration-200 ${!is2DMode
+          ? 'bg-gradient-to-r from-[#d580ff] to-[#a6ccfd] text-white shadow-lg'
+          : 'text-gray-400 hover:text-white hover:bg-white/10'
+          }`}
       >
         3D素材生成
       </button>
@@ -92,7 +90,7 @@ export default function ChatInput({
   // 视角选择按钮 (仅在2D模式下显示)
   const PerspectiveButton = () => {
     if (!is2DMode) return null
-    
+
     return (
       <Popover>
         <PopoverTrigger asChild>
@@ -112,9 +110,8 @@ export default function ChatInput({
                 key={option}
                 variant="outline"
                 size="sm"
-                className={`bg-black/30 text-white border-white/20 hover:bg-black/40 ${
-                  perspective === option ? 'ring-2 ring-[#d580ff]' : ''
-                }`}
+                className={`bg-black/30 text-white border-white/20 hover:bg-black/40 ${perspective === option ? 'ring-2 ring-[#d580ff]' : ''
+                  }`}
                 onClick={() => {
                   setPerspective?.(option)
                   insertPreset(option, 'perspective')
@@ -174,7 +171,7 @@ export default function ChatInput({
             <div className="flex items-center gap-2 flex-wrap">
               {/* 2D模式下显示视角按钮 */}
               <PerspectiveButton />
-              
+
               {/* 原有的预设按钮 */}
               {Object.entries(PRESETS).map(([key, preset]) => (
                 <Popover key={key}>
@@ -209,7 +206,7 @@ export default function ChatInput({
                   </PopoverContent>
                 </Popover>
               ))}
-              
+
               {/* 3D场景按钮 (仅在3D模式下显示) */}
               {!is2DMode && (
                 <Button
@@ -221,7 +218,7 @@ export default function ChatInput({
                   3D场景
                 </Button>
               )}
-              
+
               <div className="ml-auto">
                 <Button onClick={() => handleSend()} disabled={isLoading || !input.trim()} className="rounded-full h-[50px] w-[50px] bg-gradient-to-r from-[#d580ff] to-[#a6ccfd] text-white hover:opacity-90 hover:shadow-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed">
                   <Send className="w-5 h-5" />
@@ -241,7 +238,7 @@ export default function ChatInput({
       <div className="flex items-center justify-center mb-3">
         <TabSwitch />
       </div>
-      
+
       <div className="flex items-center gap-2">
         <div className="flex-1">
           <Input
@@ -290,7 +287,7 @@ export default function ChatInput({
             </PopoverContent>
           </Popover>
         )}
-        
+
         {Object.entries(PRESETS).map(([key, preset]) => (
           <Popover key={key}>
             <PopoverTrigger asChild>
@@ -314,7 +311,7 @@ export default function ChatInput({
             </PopoverContent>
           </Popover>
         ))}
-        
+
         {/* 3D场景按钮 (仅在3D模式下显示) */}
         {!is2DMode && (
           <Button variant="ghost" size="sm" className="hover:bg-white/10" onClick={() => onOpenThreeTest?.()}>
