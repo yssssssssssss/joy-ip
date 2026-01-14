@@ -1,0 +1,22 @@
+[
+  {
+    "name": "跳跃",
+    "url": "/three-editor/assets/models/Joy_jump.glb",
+    "preview": "/three-editor/assets/previews/joy_jump.png"
+  },
+  {
+    "name": "站姿",
+    "url": "/three-editor/assets/models/Joy_front_25.glb",
+    "preview": "/three-editor/assets/previews/joy_front_25.png"
+  },
+  {
+    "name": "坐姿",
+    "url": "/three-editor/assets/models/Joy_sit.glb",
+    "preview": "/three-editor/assets/previews/joy_sit.png"
+  },
+  {
+    "name": "坐姿2",
+    "url": "/three-editor/assets/models/Joy_sit_hi.glb",
+    "preview": "/three-editor/assets/previews/joy_sit_hi.png"
+  }
+]
