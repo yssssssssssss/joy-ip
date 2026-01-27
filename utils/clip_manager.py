@@ -24,6 +24,7 @@ def get_clip_model():
     """
     获取全局共享的 CLIP 模型
     线程安全，懒加载，只加载一次
+    支持本地模型路径，避免网络连接问题
     """
     global _GLOBAL_CLIP_MODEL
     
@@ -33,7 +34,23 @@ def get_clip_model():
                 logger.info("开始加载全局 CLIP 模型...")
                 try:
                     from sentence_transformers import SentenceTransformer
-                    _GLOBAL_CLIP_MODEL = SentenceTransformer('clip-ViT-B-32')
+                    
+                    # 优先使用本地模型路径（如果存在）
+                    local_model_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'clip-ViT-B-32')
+                    
+                    if os.path.exists(local_model_path):
+                        logger.info(f"使用本地 CLIP 模型: {local_model_path}")
+                        _GLOBAL_CLIP_MODEL = SentenceTransformer(local_model_path)
+                    else:
+                        # 尝试从 HuggingFace 下载（可能失败）
+                        logger.info("本地模型不存在，尝试从 HuggingFace 下载...")
+                        try:
+                            _GLOBAL_CLIP_MODEL = SentenceTransformer('clip-ViT-B-32')
+                        except Exception as download_error:
+                            logger.error(f"从 HuggingFace 下载失败: {download_error}")
+                            logger.info("提示：请手动下载模型到 models/clip-ViT-B-32 目录")
+                            raise
+                    
                     # 尝试设置最大序列长度
                     if hasattr(_GLOBAL_CLIP_MODEL, 'max_seq_length'):
                         try:
@@ -53,6 +70,7 @@ def get_clip_tokenizer():
     """
     获取全局共享的 CLIP 分词器
     线程安全，懒加载
+    支持本地模型路径
     """
     global _GLOBAL_CLIP_TOKENIZER
     
@@ -65,9 +83,17 @@ def get_clip_tokenizer():
                     except Exception:
                         from transformers import CLIPTokenizer as CLIPTokenizerClass
                     
-                    _GLOBAL_CLIP_TOKENIZER = CLIPTokenizerClass.from_pretrained(
-                        'openai/clip-vit-base-patch32'
-                    )
+                    # 优先使用本地模型路径
+                    local_tokenizer_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'clip-vit-base-patch32')
+                    
+                    if os.path.exists(local_tokenizer_path):
+                        logger.info(f"使用本地 CLIP 分词器: {local_tokenizer_path}")
+                        _GLOBAL_CLIP_TOKENIZER = CLIPTokenizerClass.from_pretrained(local_tokenizer_path)
+                    else:
+                        logger.info("本地分词器不存在，尝试从 HuggingFace 下载...")
+                        _GLOBAL_CLIP_TOKENIZER = CLIPTokenizerClass.from_pretrained(
+                            'openai/clip-vit-base-patch32'
+                        )
                     logger.info("✅ 全局 CLIP 分词器加载完成")
                 except Exception as e:
                     logger.warning(f"CLIP 分词器加载失败: {e}")

@@ -111,6 +111,27 @@
     will-change: transform, opacity;
 }
 
+@keyframes joy-running-log-marquee {
+    0% {
+        transform: translateX(0);
+    }
+
+    100% {
+        transform: translateX(calc(-1 * var(--joy-running-log-distance, 0px)));
+    }
+}
+
+.joy-running-log-marquee {
+    animation: joy-running-log-marquee var(--joy-running-log-duration, 8s) linear infinite;
+    will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .joy-running-log-marquee {
+        animation: none;
+    }
+}
+
 /* --- 自定义滚动条 - 磨砂玻璃质感 --- */
 /* 针对 Webkit 浏览器 (Chrome, Safari, Edge) */
 ::-webkit-scrollbar {

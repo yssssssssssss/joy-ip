@@ -28,8 +28,9 @@ ENABLE_GATE_CHECK = str(os.environ.get("ENABLE_GATE_CHECK", "1")).strip().lower(
 GATE_CHECK_SCOPE = str(os.environ.get("GATE_CHECK_SCOPE", "hats")).strip().lower()
 
 # 并行处理配置
-# 优化：默认启用4个并行worker，可通过环境变量覆盖
-MAX_PARALLEL_WORKERS = int(os.environ.get("MAX_PARALLEL_WORKERS", "4"))
+# 优化：降低并发数以避免API频率限制（429错误）
+# 从4降低到2，减少同时发送的API请求数量
+MAX_PARALLEL_WORKERS = int(os.environ.get("MAX_PARALLEL_WORKERS", "2"))
 
 class GenerationController:
     """图片生成流程控制器"""
@@ -49,7 +50,7 @@ class GenerationController:
         # 使用统一的模块加载器
         modules = {
             'banana_unified': 'banana-pro-img-jd.py',  # 统一处理模块
-            'banana_background': 'banana-background.py',
+            # 'banana_background': 'banana-background.py',  # 模块不存在，已移除
             'gate_check': 'gate-result.py',
             'per_data': 'per-data.py'
         }
@@ -120,7 +121,7 @@ class GenerationController:
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
-                    result = future.result(timeout=60)
+                    result = future.result(timeout=90)  # 90秒超时
                     if result:
                         generated_images.append(result)
                         logger.info(f"拼接任务 {idx+1}/{len(tasks)} 完成: {result}")
@@ -291,7 +292,7 @@ class GenerationController:
                 idx = future_to_idx[future]
                 original_path = image_paths[idx]
                 try:
-                    result = future.result(timeout=120)
+                    result = future.result(timeout=90)  # 90秒超时
                     results[idx] = result if result else original_path
                     logger.info(f"[{accessory_type}] 图片 {idx+1}/{len(image_paths)} 处理完成")
                 except Exception as e:
@@ -450,41 +451,8 @@ class GenerationController:
             logger.info("跳过背景处理（无背景信息）")
             return image_paths
         
-        logger.info(f"\n=== 步骤10: 处理背景 (信息: {background_info}) ===")
-        
-        if not self.banana_background:
-            logger.info("错误：banana-background模块未加载")
-            return image_paths
-        
-        processed_images = []
-        
-        for image_path in image_paths:
-            try:
-                # 调用banana-background生成图片
-                result_url = self.banana_background.generate_image_with_accessories(
-                    image_path, background_info
-                )
-                
-                if result_url:
-                    # 转换URL为本地路径
-                    if result_url.startswith('/'):
-                        result_path = result_url.lstrip('/')
-                    else:
-                        result_path = result_url
-                    
-                    logger.info(f"成功处理背景: {result_path}")
-                    processed_images.append(result_path)
-                else:
-                    logger.warning(f"生成背景图片失败: {image_path}")
-                    # 失败时保留原图片
-                    processed_images.append(image_path)
-                    
-            except Exception as e:
-                logger.warning(f"处理背景时发生错误: {str(e)}")
-                # 失败时保留原图片
-                processed_images.append(image_path)
-        
-        return processed_images
+        logger.info("背景处理功能未启用，跳过")
+        return image_paths
     
     def check_content_compliance(self, analysis: Dict[str, str]) -> bool:
         """
@@ -650,7 +618,7 @@ class GenerationController:
                 idx = future_to_idx[future]
                 image_path = image_paths[idx]
                 try:
-                    passed, reason = future.result(timeout=60)
+                    passed, reason = future.result(timeout=90)  # 90秒超时
                     results[idx] = (image_path, passed, reason)
                     status = "✅ 通过" if passed else f"❌ 未通过: {reason}"
                     _log(f"图片 [{idx+1}/{len(image_paths)}] {status}")
@@ -709,4 +677,3 @@ if __name__ == "__main__":
     # 执行完整流程
     # result = controller.generate_complete_flow(head_matches, body_matches, analysis)
     # logger.info(f"最终生成的图片: {result}")
-

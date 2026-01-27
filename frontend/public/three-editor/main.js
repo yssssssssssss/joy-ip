@@ -6,10 +6,13 @@ let ambientLight, dirLight, pointLight, spotLight;
 let model, skeleton, mixer;
 let renderInfoEl, loadingEl;
 let renderAreaEl;
-let currentAspect = 16 / 9;
-// 视窗比例微调：在当前基础上将宽高比（W/H）增加 5%
-let baseViewportAspect = null; // 首次测得的视窗比例（W/H）
-let targetViewportAspect = null; // 目标视窗比例（W/H）
+
+const TARGET_CANVAS_WIDTH = 1024;
+const TARGET_CANVAS_HEIGHT = 1200;
+const TARGET_CANVAS_ASPECT = TARGET_CANVAS_WIDTH / TARGET_CANVAS_HEIGHT;
+
+let currentAspect = TARGET_CANVAS_ASPECT;
+let renderAreaResizeObserver = null;
 
 const canvas = document.getElementById('canvas');
 
@@ -90,8 +93,25 @@ function onWindowResize() {
 
 function getRenderSize() {
   const el = renderAreaEl || document.querySelector('.render-area');
+  if (!el) return { width: 1, height: 1 };
   const rect = el.getBoundingClientRect();
-  return { width: Math.max(1, Math.floor(rect.width)), height: Math.max(1, Math.floor(rect.height)) };
+
+  const maxWidth = Math.max(1, Math.floor(rect.width));
+  const maxHeight = Math.max(1, Math.floor(rect.height));
+
+  const aspect = TARGET_CANVAS_ASPECT;
+  let width = maxWidth;
+  let height = Math.max(1, Math.round(width / aspect));
+  if (height > maxHeight) {
+    height = maxHeight;
+    width = Math.max(1, Math.round(height * aspect));
+  }
+  if (width > maxWidth) {
+    width = maxWidth;
+    height = Math.max(1, Math.round(width / aspect));
+  }
+
+  return { width, height };
 }
 
 function syncAspectFromView() {
@@ -99,36 +119,14 @@ function syncAspectFromView() {
   currentAspect = width / Math.max(1, height);
 }
 
-// 将视窗的宽高比在当前基础上增加指定百分比（默认 5%）
-function applyViewportAspectIncrease(percent = 0.05) {
+function observeRenderAreaResize() {
   if (!renderAreaEl) renderAreaEl = document.querySelector('.render-area');
-  if (!renderAreaEl) return;
-  const rect = renderAreaEl.getBoundingClientRect();
-  const curr = rect.width / Math.max(1, rect.height);
-  if (baseViewportAspect == null) {
-    baseViewportAspect = curr;
-  }
-  targetViewportAspect = baseViewportAspect * (1 + percent);
-  const targetHeight = Math.max(1, Math.floor(rect.width / targetViewportAspect));
-  // 通过设置容器高度来实现更“扁”的显示区域
-  renderAreaEl.style.height = `${targetHeight}px`;
-  // 同步 three 的尺寸与相机比例
-  currentAspect = targetViewportAspect;
-  onWindowResize();
-}
-
-// 监听容器尺寸变化，保持目标视窗比例
-function observeViewportAspect() {
-  if (!renderAreaEl) renderAreaEl = document.querySelector('.render-area');
-  if (!renderAreaEl) return;
-  const ro = new ResizeObserver(() => {
-    if (!targetViewportAspect) return;
-    const rect = renderAreaEl.getBoundingClientRect();
-    const targetHeight = Math.max(1, Math.floor(rect.width / targetViewportAspect));
-    renderAreaEl.style.height = `${targetHeight}px`;
+  if (!renderAreaEl || typeof ResizeObserver === 'undefined') return;
+  if (renderAreaResizeObserver) renderAreaResizeObserver.disconnect();
+  renderAreaResizeObserver = new ResizeObserver(() => {
     onWindowResize();
   });
-  ro.observe(renderAreaEl);
+  renderAreaResizeObserver.observe(renderAreaEl);
 }
 
 function animate() {
@@ -234,44 +232,22 @@ async function initApprovedGrid() {
     list.forEach((item, index) => {
       const card = document.createElement('div');
       card.className = 'approved-item';
-      card.style.display = 'inline-flex';
-      card.style.flexDirection = 'column';
-      card.style.alignItems = 'center';
-      card.style.justifyContent = 'center';
-      card.style.gap = '6px';
-      card.style.margin = '6px';
-      card.style.padding = '8px';
-      card.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-      card.style.borderRadius = '10px';
-      card.style.cursor = 'pointer';
-      card.style.background = '#424158';
-      card.style.transition = 'all 0.2s ease';
+      if (item.name) card.title = item.name;
 
       const img = document.createElement('img');
       img.loading = 'lazy'; // 懒加载优化
+      img.decoding = 'async';
       img.src = item.preview;
       img.alt = item.name || '预审模型';
-      img.style.width = '80px';
-      img.style.height = '60px';
-      img.style.objectFit = 'cover';
-      img.style.borderRadius = '6px';
+      img.className = 'model-thumb';
 
       const label = document.createElement('div');
       label.textContent = item.name || '';
-      label.style.fontSize = '12px';
-      label.style.color = '#b7affe';
+      label.className = 'model-label';
 
       card.appendChild(img);
       card.appendChild(label);
-      
-      card.addEventListener('mouseenter', () => {
-        card.style.background = '#4a4964';
-        card.style.transform = 'translateY(-2px)';
-      });
-      card.addEventListener('mouseleave', () => {
-        card.style.background = '#424158';
-        card.style.transform = 'translateY(0)';
-      });
+
       card.addEventListener('click', () => {
         // 显示加载状态
         if (loadingEl) loadingEl.style.display = 'flex';
@@ -337,7 +313,7 @@ async function renderHighQuality(options = {}) {
       controls.update();
     }
 
-    renderer.setSize(width * supersample, height * supersample);
+    renderer.setSize(width * supersample, height * supersample, false);
     renderer.setPixelRatio(1);
     renderer.render(scene, camera);
 
@@ -366,7 +342,7 @@ async function renderHighQuality(options = {}) {
         console.error('Failed to persist render:', e);
       }
 
-      renderer.setSize(oldSize.x, oldSize.y);
+      renderer.setSize(oldSize.x, oldSize.y, false);
       renderer.setPixelRatio(oldRatio);
       // 恢复渲染前的镜头与视角
       if (didAdjustLens) {
@@ -591,9 +567,7 @@ window.addEventListener('DOMContentLoaded', () => {
   initScene();
   setupUI();
   initApprovedGrid();
-  // 在当前基础上将视窗的宽高比（W/H）增加 5%，并保持该比例
-  applyViewportAspectIncrease(0.05);
-  observeViewportAspect();
+  observeRenderAreaResize();
   animate();
 });
 // Use ES Modules imports to avoid deprecated global build and ensure controls/loaders work

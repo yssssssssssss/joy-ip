@@ -28,8 +28,8 @@ GATE_CHECK_SCOPE = str(os.environ.get("GATE_CHECK_SCOPE", "hats")).strip().lower
 
 # 并行处理配置
 MAX_PARALLEL_WORKERS = int(os.environ.get("MAX_PARALLEL_WORKERS", "2"))
-# 2D 专属并行配置（默认 4，比 3D 更高以提升效率）
-MAX_PARALLEL_WORKERS_2D = int(os.environ.get("MAX_PARALLEL_WORKERS_2D", "4"))
+# 2D 专属并行配置（降低到2以避免API频率限制）
+MAX_PARALLEL_WORKERS_2D = int(os.environ.get("MAX_PARALLEL_WORKERS_2D", "2"))
 
 
 class GenerationController2D:
@@ -55,7 +55,7 @@ class GenerationController2D:
         """动态加载所需的Python模块"""
         modules = {
             'banana_unified': 'banana-pro-img-jd.py',  # 统一处理模块
-            'banana_background': 'banana-background.py',
+            # 'banana_background': 'banana-background.py',  # 模块不存在，已移除
             'gate_check': 'gate-result.py',
             'per_data_2d': 'per-data-2D.py'  # 2D拼接模块
         }
@@ -129,7 +129,7 @@ class GenerationController2D:
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
-                    result = future.result(timeout=60)
+                    result = future.result(timeout=90)  # 90秒超时
                     if result:
                         generated_images.append(result)
                         logger.info(f"拼接任务 {idx+1}/{len(tasks)} 完成: {result}")
@@ -279,7 +279,7 @@ class GenerationController2D:
                 idx = future_to_idx[future]
                 original_path = image_paths[idx]
                 try:
-                    result = future.result(timeout=120)
+                    result = future.result(timeout=90)  # 90秒超时
                     results[idx] = result if result else original_path
                     logger.info(f"[{accessory_type}] 图片 {idx+1}/{len(image_paths)} 处理完成")
                 except Exception as e:
@@ -319,36 +319,8 @@ class GenerationController2D:
             logger.info("跳过背景处理（无背景信息）")
             return image_paths
         
-        logger.info(f"=== 2D背景处理 (信息: {background_info}) ===")
-        
-        if not self.banana_background:
-            logger.info("banana-background模块未加载")
-            return image_paths
-        
-        processed_images = []
-        
-        for image_path in image_paths:
-            try:
-                result_url = self.banana_background.generate_image_with_accessories(
-                    image_path, background_info
-                )
-                
-                if result_url:
-                    if result_url.startswith('/'):
-                        result_path = result_url.lstrip('/')
-                    else:
-                        result_path = result_url
-                    logger.info(f"成功处理背景: {result_path}")
-                    processed_images.append(result_path)
-                else:
-                    logger.warning(f"生成背景图片失败: {image_path}")
-                    processed_images.append(image_path)
-                    
-            except Exception as e:
-                logger.warning(f"处理背景时发生错误: {str(e)}")
-                processed_images.append(image_path)
-        
-        return processed_images
+        logger.info("背景处理功能未启用，跳过")
+        return image_paths
     
     def check_content_compliance(self, analysis: Dict[str, str]) -> bool:
         """检查生成内容是否合规"""
@@ -439,7 +411,7 @@ class GenerationController2D:
                 idx = future_to_idx[future]
                 image_path = image_paths[idx]
                 try:
-                    passed, reason = future.result(timeout=60)
+                    passed, reason = future.result(timeout=90)  # 90秒超时
                     results[idx] = (image_path, passed, reason)
                     status = "✅ 通过" if passed else f"❌ 未通过: {reason}"
                     _log(f"图片 [{idx+1}/{len(image_paths)}] {status}")
@@ -472,7 +444,8 @@ class GenerationController2D:
 
     
     def generate_complete_flow(self, requirement: str, perspective: str = "正视角",
-                                output_dir: str = "output", pre_analysis: Dict = None) -> Dict:
+                                output_dir: str = "output", pre_analysis: Dict = None,
+                                base_image_path: str = None) -> Dict:
         """
         2D完整图片生成流程
         
@@ -481,6 +454,7 @@ class GenerationController2D:
             perspective: 视角（正视角/仰视角）
             output_dir: 输出目录
             pre_analysis: 预分析结果（可选），如果提供则跳过内容分析步骤
+            base_image_path: 2D底图路径（可选），如果提供则跳过头/身匹配与拼装步骤
             
         Returns:
             Dict: 生成结果，包含success, images, logs等
@@ -528,37 +502,52 @@ class GenerationController2D:
             result["logs"].append(result["error"])
             return result
         
-        # 步骤1: 匹配头像和身体（各选2张，组合生成4张）
-        try:
-            head_matches, head_logs = self.head_matcher.find_one_best_match_2d(
-                requirement, perspective, top_k=5, num_select=2
-            )
-            result["logs"].extend(head_logs)
-            
-            body_matches, body_logs = self.body_matcher.find_one_best_match_2d(
-                requirement, perspective, top_k=5, num_select=2
-            )
-            result["logs"].extend(body_logs)
-            
-            if not head_matches or not body_matches:
-                result["error"] = "未找到匹配的头像或身体图片"
+        images = []
+
+        # 如果指定了底图，跳过头/身匹配与拼装步骤
+        if base_image_path:
+            if not isinstance(base_image_path, str) or not base_image_path.strip():
+                result["error"] = "底图路径无效"
                 return result
-                
-            result["logs"].append(f"匹配完成: head={len(head_matches)}, body={len(body_matches)}")
-        except Exception as e:
-            result["error"] = f"图片匹配异常: {str(e)}"
-            result["logs"].append(result["error"])
-            return result
-        
-        # 步骤2: 生成基础拼接图片
-        action_type = analysis.get('动作', '站姿')
-        images = self.generate_step1_images(head_matches, body_matches, output_dir, action_type)
-        
-        if not images:
-            result["error"] = "未能生成基础图片"
-            return result
-        
-        result["logs"].append(f"基础图片生成完成: {len(images)} 张")
+            if not os.path.exists(base_image_path):
+                result["error"] = f"底图文件不存在: {base_image_path}"
+                result["logs"].append(result["error"])
+                return result
+
+            images = [base_image_path]
+            result["logs"].append(f"使用底图，跳过头/身匹配与拼装: {base_image_path}")
+        else:
+            # 步骤1: 匹配头像和身体（各选2张，组合生成4张）
+            try:
+                head_matches, head_logs = self.head_matcher.find_one_best_match_2d(
+                    requirement, perspective, top_k=5, num_select=2
+                )
+                result["logs"].extend(head_logs)
+
+                body_matches, body_logs = self.body_matcher.find_one_best_match_2d(
+                    requirement, perspective, top_k=5, num_select=2
+                )
+                result["logs"].extend(body_logs)
+
+                if not head_matches or not body_matches:
+                    result["error"] = "未找到匹配的头像或身体图片"
+                    return result
+
+                result["logs"].append(f"匹配完成: head={len(head_matches)}, body={len(body_matches)}")
+            except Exception as e:
+                result["error"] = f"图片匹配异常: {str(e)}"
+                result["logs"].append(result["error"])
+                return result
+
+            # 步骤2: 生成基础拼接图片
+            action_type = analysis.get('动作', '站姿')
+            images = self.generate_step1_images(head_matches, body_matches, output_dir, action_type)
+
+            if not images:
+                result["error"] = "未能生成基础图片"
+                return result
+
+            result["logs"].append(f"基础图片生成完成: {len(images)} 张")
         
         # 步骤3: 处理配件
         images = self.process_accessories_unified(images, analysis, output_dir)

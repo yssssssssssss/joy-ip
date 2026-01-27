@@ -297,12 +297,17 @@ class HeadMatcher(BaseMatcher):
                 return ""
             
             # 使用共享 HTTP 客户端
-            from utils.http_client import http_post
+            from utils.http_client import http_post, parse_ai_response
             
             payload = {
                 "model": "doubao-seed-1.6-250615",
-                "messages": [
-                    {"role": "user", "content": f"Translate this Chinese facial expression to English for image search. Output ONLY the English phrase, no explanation.\nChinese: {cn_text}\nEnglish:"}
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"text": f"Translate this Chinese facial expression to English for image search. Output ONLY the English phrase, no explanation.\nChinese: {cn_text}\nEnglish:"}
+                        ]
+                    }
                 ],
                 "temperature": 0,
                 "max_tokens": 30,
@@ -312,20 +317,10 @@ class HeadMatcher(BaseMatcher):
                 "Authorization": f"Bearer {self.api_token}",
                 "Content-Type": "application/json"
             }
-            
-            resp = http_post(self.api_url, json=payload, headers=headers, timeout=30)
+
+            resp = http_post(self.api_url, json=payload, headers=headers, timeout=90)  # 90秒超时
             resp.raise_for_status()
-            data = resp.json()
-            
-            en_text = ""
-            choices = data.get("choices", [])
-            if choices:
-                msg = choices[0].get("message", {})
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    en_text = content.strip()
-                elif isinstance(content, dict):
-                    en_text = content.get("text", "").strip()
+            en_text = parse_ai_response(resp.json())
             
             if en_text:
                 # 清理结果

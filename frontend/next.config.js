@@ -16,6 +16,7 @@ const nextConfig = {
       { source: '/api/:path*', destination: `${backendOrigin}/api/:path*` },
       { source: '/output/:path*', destination: `${backendOrigin}/output/:path*` },
       { source: '/generated_images/:path*', destination: `${backendOrigin}/generated_images/:path*` },
+      { source: '/data/2d/:path*', destination: `${backendOrigin}/data/2d/:path*` },
     ]
   },
 }

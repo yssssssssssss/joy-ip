@@ -22,6 +22,10 @@ logs/
 output/
 generated_images/
 cache/
+generated_image*.png
+
+# 本地模型文件（体积大，不提交）
+models/
 
 # Jupyter Notebook
 .ipynb_checkpoints/
@@ -34,6 +38,7 @@ frontend/.cache/
 frontend/.next/
 frontend/out/
 frontend/output/
+*.tsbuildinfo
 
 # IDE
 .vscode/
@@ -50,3 +55,6 @@ frontend/output/
 .coverage
 htmlcov/
 .pytest_cache/
+
+# 测试输出图片
+test/*.png

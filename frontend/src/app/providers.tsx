@@ -58,19 +58,40 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           selectedPresets?: SelectedPresets
           scrollTop?: number
         }
+        
+        // 验证数据结构完整性
+        if (!parsed || typeof parsed !== 'object') {
+          console.warn('localStorage 数据格式无效，清除数据')
+          localStorage.removeItem('joy_ip_chat_state')
+          return
+        }
+        
         if (parsed.messages && Array.isArray(parsed.messages)) {
-          const restored = parsed.messages.map(m => ({
-            ...m,
-            timestamp: new Date(m.timestamp)
-          }))
-          setMessages(restored)
+          try {
+            const restored = parsed.messages.map(m => ({
+              ...m,
+              timestamp: new Date(m.timestamp)
+            }))
+            setMessages(restored)
+          } catch (msgError) {
+            console.warn('恢复消息失败:', msgError)
+            // 消息恢复失败不影响其他数据
+          }
         }
         if (typeof parsed.input === 'string') setInput(parsed.input)
-        if (parsed.selectedPresets) setSelectedPresets(parsed.selectedPresets)
+        if (parsed.selectedPresets && typeof parsed.selectedPresets === 'object') {
+          setSelectedPresets(parsed.selectedPresets)
+        }
         if (typeof parsed.scrollTop === 'number') setScrollTop(parsed.scrollTop)
       }
     } catch (e) {
-      console.warn('恢复聊天状态失败:', e)
+      console.error('恢复聊天状态失败，清除损坏数据:', e)
+      // 清除损坏的数据，避免下次加载时再次失败
+      try {
+        localStorage.removeItem('joy_ip_chat_state')
+      } catch (clearError) {
+        console.error('清除 localStorage 失败:', clearError)
+      }
     }
   }, [])
 

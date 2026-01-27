@@ -73,7 +73,7 @@ def http_post(
     url: str,
     json: Optional[Dict] = None,
     headers: Optional[Dict] = None,
-    timeout: int = 60,
+    timeout: int = 90,
     **kwargs
 ) -> requests.Response:
     """

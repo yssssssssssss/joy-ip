@@ -51,6 +51,7 @@ class Job:
 
     def to_dict(self) -> Dict:
         """转换为字典"""
+        latest_log = self.logs[-1] if self.logs else None
         return {
             "job_id": self.job_id,
             "status": self.status.value,
@@ -64,6 +65,8 @@ class Job:
             "error": self.error,
             "details": self.details,
             "updated_at": self.updated_at,
+            "latest_log": latest_log,
+            "logs_count": len(self.logs),
             "queue_position": self.queue_position,
             "estimated_wait": round(self.estimated_wait, 1),
             "created_at": self.created_at,

@@ -24,11 +24,10 @@ class Config:
     # =========================
     AI_API_URL: str = os.environ.get(
         'AI_API_URL', 
-        'https://modelservice.jdcloud.com/v1/chat/completions'
+        'https://modelservice.jdcloud.com/v1/responses'
     )
     AI_API_KEY: str = os.environ.get('AI_API_KEY', '')
-    # AI_MODEL: str = os.environ.get('AI_MODEL', 'Gemini-3-Flash-Preview')
-    AI_MODEL: str = os.environ.get('AI_MODEL', 'Gemini-2.5-pro')
+    AI_MODEL: str = os.environ.get('AI_MODEL', 'Gemini-3-Flash-Preview')
 
     
     # 合并AI分析专用模型（可单独配置，不影响其他环节）

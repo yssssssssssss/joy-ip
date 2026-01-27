@@ -40,6 +40,8 @@ export interface JobStatus {
   images: string[]
   error?: string
   details?: Record<string, any>
+  latest_log?: string | null
+  logs_count?: number
   queue_position: number
   estimated_wait: number
   created_at: number

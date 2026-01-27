@@ -9,6 +9,7 @@
 
 import os
 import re
+import uuid
 import logging
 from typing import Dict, List, Tuple
 from config import get_config
@@ -62,6 +63,31 @@ class ContentAgent:
         self.model = config.AI_MODEL
         # 合并AI分析专用模型（如果未配置则使用默认模型）
         self.analysis_model = config.AI_ANALYSIS_MODEL if config.AI_ANALYSIS_MODEL else config.AI_MODEL
+        # 添加logger作为实例属性，确保子类也能访问
+        self.logger = logger
+
+    def _call_llm_text(self, model: str, system_text: str, user_text: str) -> str:
+        trace_id = str(uuid.uuid4())
+        headers = {
+            "Content-Type": "application/json",
+            "Trace-Id": trace_id,
+            "Authorization": f"Bearer {self.api_token}"
+        }
+        merged_text = f"{system_text}\n\n{user_text}" if system_text else user_text
+        payload = {
+            "model": model,
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": merged_text}
+                    ]
+                }
+            ]
+        }
+        resp = http_post(self.api_url, json=payload, headers=headers, timeout=90)
+        resp.raise_for_status()
+        return parse_ai_response(resp.json())
     
     @property
     def body_matcher(self):
@@ -80,7 +106,7 @@ class ContentAgent:
     def update_banned_words_from_url(self, url: str) -> bool:
         """从在线URL更新违规词库"""
         try:
-            response = http_get(url, timeout=30)
+            response = http_get(url, timeout=90)  # 90秒超时
             response.raise_for_status()
             os.makedirs("data", exist_ok=True)
             with open("data/sensitive_words.txt", 'w', encoding='utf-8') as f:
@@ -114,23 +140,7 @@ class ContentAgent:
 
 如果内容合规，回复"合规"。
 如果不合规，回复"不合规：[原因]"。"""
-
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": "你是敏感内容审核专家。"},
-                    {"role": "user", "content": prompt}
-                ],
-                "stream": False
-            }
-            headers = {
-                "Authorization": f"Bearer {self.api_token}",
-                "Content-Type": "application/json"
-            }
-            
-            resp = http_post(self.api_url, json=payload, headers=headers, timeout=120)
-            resp.raise_for_status()
-            result = parse_ai_response(resp.json())
+            result = self._call_llm_text(self.model, "你是敏感内容审核专家。", prompt)
             
             if not result:
                 return True, ""
@@ -236,23 +246,7 @@ class ContentAgent:
             头戴：xxx
             手持：xxx
             """
-
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": "你是专业的美术指导，擅长从文本中提取角色装扮信息。"},
-                    {"role": "user", "content": prompt}
-                ],
-                "stream": False
-            }
-            headers = {
-                "Authorization": f"Bearer {self.api_token}",
-                "Content-Type": "application/json"
-            }
-            
-            resp = http_post(self.api_url, json=payload, headers=headers, timeout=120)
-            resp.raise_for_status()
-            ai_text = parse_ai_response(resp.json())
+            ai_text = self._call_llm_text(self.model, "你是专业的美术指导，擅长从文本中提取角色装扮信息。", prompt)
             
             if not ai_text:
                 logger.warning("AI分析返回空结果")
@@ -269,7 +263,7 @@ class ContentAgent:
                 for key in result.keys():
                     if line.startswith(f"{key}：") or line.startswith(f"{key}:"):
                         value = line.split('：', 1)[-1].split(':', 1)[-1].strip()
-                        if value and value not in ["无", "没有", "未提及", "未知"]:
+                        if value and value not in ["没有", "未提及", "未知"]:
                             result[key] = value
                         break
             
@@ -375,23 +369,7 @@ class ContentAgent:
             """
             for field in fields:
                 prompt += f"{field}：xxx\n"
-
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": "你是专业的服装搭配师，擅长根据主题风格搭配协调的装扮。"},
-                    {"role": "user", "content": prompt}
-                ],
-                "stream": False
-            }
-            headers = {
-                "Authorization": f"Bearer {self.api_token}",
-                "Content-Type": "application/json"
-            }
-            
-            resp = http_post(self.api_url, json=payload, headers=headers, timeout=120)
-            resp.raise_for_status()
-            ai_text = parse_ai_response(resp.json())
+            ai_text = self._call_llm_text(self.model, "你是专业的服装搭配师，擅长根据主题风格搭配协调的装扮。", prompt)
             
             if not ai_text:
                 return {}
@@ -573,23 +551,12 @@ class ContentAgent:
 手持：xxx"""
 
             # 使用专用的分析模型（可独立配置）
-            payload = {
-                "model": self.analysis_model,
-                "messages": [
-                    {"role": "system", "content": "你是专业的内容审核和美术指导，擅长检查内容合规性、提取角色装扮信息并进行风格搭配。"},
-                    {"role": "user", "content": prompt}
-                ],
-                "stream": False
-            }
-            headers = {
-                "Authorization": f"Bearer {self.api_token}",
-                "Content-Type": "application/json"
-            }
-            
             logger.info(f"合并AI分析使用模型: {self.analysis_model}")
-            resp = http_post(self.api_url, json=payload, headers=headers, timeout=120)
-            resp.raise_for_status()
-            ai_text = parse_ai_response(resp.json())
+            ai_text = self._call_llm_text(
+                self.analysis_model,
+                "你是专业的内容审核和美术指导，擅长检查内容合规性、提取角色装扮信息并进行风格搭配。",
+                prompt
+            )
             
             if ai_text:
                 logger.info(f"AI合并分析原文: {ai_text}")

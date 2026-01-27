@@ -1110,8 +1110,7 @@ export default function DetailView() {
                       if (!posterImage || !maskData || !imageUrl) return
                       setIsMerging(true)
                       try {
-                        const apiUrl = 'https://modelservice.jdcloud.com/v1/images/gemini_flash/generations'
-                        const apiKey = 'pk-a3b4d157-e765-45b9-988a-b8b2a6d7c8bf'
+                        const apiUrl = '/api/gemini_flash/generations'
 
                         // 构建请求
                         const extractBase64 = (dataUrl: string) => dataUrl.startsWith('data:') ? dataUrl.split(',')[1] : dataUrl
@@ -1165,7 +1164,6 @@ export default function DetailView() {
                         const response = await fetch(apiUrl, {
                           method: 'POST',
                           headers: {
-                            'Authorization': `Bearer ${apiKey}`,
                             'Content-Type': 'application/json'
                           },
                           body: JSON.stringify({
@@ -1381,4 +1379,3 @@ export default function DetailView() {
     </div>
   )
 }
-

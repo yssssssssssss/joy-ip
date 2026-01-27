@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>轮询性能测试 - JOY IP</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        
+        .test-section {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        
+        .test-section h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 20px;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-secondary {
+            background: #e0e8ff;
+            color: #667eea;
+        }
+        
+        .btn-secondary:hover {
+            background: #d0d8ef;
+        }
+        
+        .log-container {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            max-height: 400px;
+            overflow-y: auto;
+            line-height: 1.6;
+        }
+        
+        .log-entry {
+            margin-bottom: 5px;
+        }
+        
+        .log-success {
+            color: #4ec9b0;
+        }
+        
+        .log-error {
+            color: #f48771;
+        }
+        
+        .log-info {
+            color: #9cdcfe;
+        }
+        
+        .log-warning {
+            color: #dcdcaa;
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .stat-label {
+            color: #666;
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+        
+        .stat-value {
+            color: #333;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        
+        .stat-unit {
+            color: #999;
+            font-size: 14px;
+            margin-left: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔬 轮询性能测试工具</h1>
+        
+        <div class="test-section">
+            <h2>测试场景 1: 模拟快速任务（10秒完成）</h2>
+            <div class="button-group">
+                <button class="btn-primary" onclick="testFastTask()">开始测试</button>
+                <button class="btn-secondary" onclick="clearLog('log1')">清除日志</button>
+            </div>
+            <div id="log1" class="log-container"></div>
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="stat-label">总轮询次数</div>
+                    <div class="stat-value" id="stat1-polls">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">检测延迟</div>
+                    <div class="stat-value" id="stat1-delay">0<span class="stat-unit">ms</span></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">总耗时</div>
+                    <div class="stat-value" id="stat1-total">0<span class="stat-unit">s</span></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="test-section">
+            <h2>测试场景 2: 模拟中等任务（60秒完成）</h2>
+            <div class="button-group">
+                <button class="btn-primary" onclick="testMediumTask()">开始测试</button>
+                <button class="btn-secondary" onclick="clearLog('log2')">清除日志</button>
+            </div>
+            <div id="log2" class="log-container"></div>
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="stat-label">总轮询次数</div>
+                    <div class="stat-value" id="stat2-polls">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">检测延迟</div>
+                    <div class="stat-value" id="stat2-delay">0<span class="stat-unit">ms</span></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">总耗时</div>
+                    <div class="stat-value" id="stat2-total">0<span class="stat-unit">s</span></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="test-section">
+            <h2>测试场景 3: 对比旧轮询策略（2.5秒固定间隔）</h2>
+            <div class="button-group">
+                <button class="btn-primary" onclick="testOldStrategy()">开始测试</button>
+                <button class="btn-secondary" onclick="clearLog('log3')">清除日志</button>
+            </div>
+            <div id="log3" class="log-container"></div>
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="stat-label">总轮询次数</div>
+                    <div class="stat-value" id="stat3-polls">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">检测延迟</div>
+                    <div class="stat-value" id="stat3-delay">0<span class="stat-unit">ms</span></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">总耗时</div>
+                    <div class="stat-value" id="stat3-total">0<span class="stat-unit">s</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        function log(containerId, message, type = 'info') {
+            const container = document.getElementById(containerId);
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
+            entry.textContent = `[${timestamp}] ${message}`;
+            container.appendChild(entry);
+            container.scrollTop = container.scrollHeight;
+        }
+        
+        function clearLog(containerId) {
+            document.getElementById(containerId).innerHTML = '';
+        }
+        
+        function updateStats(prefix, polls, delay, total) {
+            document.getElementById(`${prefix}-polls`).textContent = polls;
+            document.getElementById(`${prefix}-delay`).textContent = delay;
+            document.getElementById(`${prefix}-total`).textContent = total.toFixed(1);
+        }
+        
+        // 模拟动态轮询策略（新策略）
+        async function simulateDynamicPolling(taskDuration, logId, statsPrefix) {
+            log(logId, '🚀 开始任务...', 'info');
+            const startTime = Date.now();
+            const completeTime = startTime + taskDuration;
+            let pollCount = 0;
+            let detected = false;
+            let detectionDelay = 0;
+            
+            while (!detected) {
+                pollCount++;
+                const now = Date.now();
+                const elapsed = (now - startTime) / 1000;
+                
+                // 动态轮询间隔
+                const interval = pollCount <= 60 ? 1000 : 2000;
+                
+                log(logId, `📡 轮询 #${pollCount} (间隔: ${interval}ms, 已用时: ${elapsed.toFixed(1)}s)`, 'info');
+                
+                // 检查任务是否完成
+                if (now >= completeTime) {
+                    detected = true;
+                    detectionDelay = now - completeTime;
+                    log(logId, `✅ 任务完成！检测延迟: ${detectionDelay}ms`, 'success');
+                    const totalTime = (now - startTime) / 1000;
+                    updateStats(statsPrefix, pollCount, detectionDelay, totalTime);
+                    break;
+                }
+                
+                await new Promise(resolve => setTimeout(resolve, interval));
+            }
+        }
+        
+        // 模拟固定轮询策略（旧策略）
+        async function simulateFixedPolling(taskDuration, logId, statsPrefix) {
+            log(logId, '🚀 开始任务（旧策略：2.5秒固定间隔）...', 'info');
+            const startTime = Date.now();
+            const completeTime = startTime + taskDuration;
+            let pollCount = 0;
+            let detected = false;
+            let detectionDelay = 0;
+            const interval = 2500;
+            
+            while (!detected) {
+                pollCount++;
+                const now = Date.now();
+                const elapsed = (now - startTime) / 1000;
+                
+                log(logId, `📡 轮询 #${pollCount} (间隔: ${interval}ms, 已用时: ${elapsed.toFixed(1)}s)`, 'info');
+                
+                // 检查任务是否完成
+                if (now >= completeTime) {
+                    detected = true;
+                    detectionDelay = now - completeTime;
+                    log(logId, `✅ 任务完成！检测延迟: ${detectionDelay}ms`, 'success');
+                    const totalTime = (now - startTime) / 1000;
+                    updateStats(statsPrefix, pollCount, detectionDelay, totalTime);
+                    break;
+                }
+                
+                await new Promise(resolve => setTimeout(resolve, interval));
+            }
+        }
+        
+        async function testFastTask() {
+            clearLog('log1');
+            log('log1', '📋 测试场景: 10秒快速任务', 'warning');
+            await simulateDynamicPolling(10000, 'log1', 'stat1');
+        }
+        
+        async function testMediumTask() {
+            clearLog('log2');
+            log('log2', '📋 测试场景: 60秒中等任务', 'warning');
+            await simulateDynamicPolling(60000, 'log2', 'stat2');
+        }
+        
+        async function testOldStrategy() {
+            clearLog('log3');
+            log('log3', '📋 测试场景: 10秒任务（旧策略对比）', 'warning');
+            await simulateFixedPolling(10000, 'log3', 'stat3');
+        }
+    </script>
+</body>
+</html>

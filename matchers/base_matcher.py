@@ -40,11 +40,16 @@ class BaseMatcher:
         统一的AI调用方法，使用共享 HTTP Session
         """
         try:
+            merged_text = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt
             payload = {
                 "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"text": merged_text}
+                        ]
+                    }
                 ],
                 "temperature": temperature,
                 "max_tokens": max_tokens,
@@ -55,7 +60,7 @@ class BaseMatcher:
                 "Content-Type": "application/json"
             }
             
-            resp = http_post(self.api_url, json=payload, headers=headers, timeout=60)
+            resp = http_post(self.api_url, json=payload, headers=headers, timeout=90)  # 90秒超时
             resp.raise_for_status()
             data = resp.json()
             

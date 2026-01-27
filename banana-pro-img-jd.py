@@ -2,6 +2,8 @@ import requests
 import json
 import base64
 import time
+import os
+import threading
 from pathlib import Path
 # 导入2D/3D统一接口
 from prompt_templates_2d import get_system_prompt, get_accessory_instruction, get_constraints
@@ -15,7 +17,7 @@ except ImportError:
 
 # API 地址与鉴权
 URL = "https://modelservice.jdcloud.com/v1/images/gemini_flash/generations"
-API_KEY = "pk-a3b4d157-e765-45b9-988a-b8b2a6d7c8bf"
+API_KEY = os.environ.get("AI_API_KEY", "")
 
 # 在此配置本地图片路径（作为默认值，可被命令行参数覆盖）
 IMG1_PATH = r"C:\Users\heyunshen\Downloads\badcase\generated_1763630969.png"
@@ -27,6 +29,11 @@ OUTPUT_DIR = Path("output")
 PROMPT_TEXT = (
     "严格保持图片1中角色的动作、表情一致性，进行品牌风格优化"
 )
+
+_JD_IMG_SERIALIZE = str(os.environ.get("JD_IMG_SERIALIZE", "1")).strip().lower() in ("1", "true", "yes")
+_JD_IMG_MIN_INTERVAL_S = float(os.environ.get("JD_IMG_MIN_INTERVAL_S", "0.8"))
+_JD_IMG_LOCK = threading.Lock()
+_JD_IMG_LAST_AT = 0.0
 
 def detect_mime_type(path: str) -> str:
     lower = str(path).lower()
@@ -139,6 +146,61 @@ def extract_generated_image_base64(resp_json: dict) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _extract_api_error(resp_json: object) -> dict | None:
+    if not isinstance(resp_json, dict):
+        return None
+    err = resp_json.get("error")
+    if not isinstance(err, dict):
+        return None
+
+    code = err.get("code")
+    status = err.get("status")
+    message = err.get("message")
+
+    if isinstance(message, str):
+        try:
+            nested = json.loads(message)
+        except Exception:
+            nested = None
+        if isinstance(nested, dict) and isinstance(nested.get("error"), dict):
+            nerr = nested.get("error") or {}
+            return {
+                "code": nerr.get("code") if nerr.get("code") is not None else code,
+                "status": nerr.get("status") if nerr.get("status") is not None else status,
+                "message": nerr.get("message") if nerr.get("message") is not None else message,
+                "raw": err,
+            }
+
+    return {"code": code, "status": status, "message": message, "raw": err}
+
+
+def _should_retry_response(status_code: int, resp_json: object) -> tuple[bool, dict | None]:
+    retryable_http = {429, 500, 502, 503, 504}
+    err = _extract_api_error(resp_json)
+
+    if status_code in retryable_http:
+        return True, err
+
+    if err:
+        try:
+            err_code = int(err.get("code")) if err.get("code") is not None else None
+        except Exception:
+            err_code = None
+
+        if err_code in retryable_http:
+            return True, err
+
+        status = err.get("status")
+        if isinstance(status, str) and status.strip().upper() in {"RESOURCE_EXHAUSTED"}:
+            return True, err
+
+        message = err.get("message")
+        if isinstance(message, str) and "resource exhausted" in message.lower():
+            return True, err
+
+    return False, err
 
 
 def generate_image_with_accessories(image_path, accessories_info, style="default", mode="3d"):
@@ -355,31 +417,33 @@ def _generate_single_image(image_path: str, prompt: str) -> str:
         "Trace-Id": "banana-pro-img-jd-unified",
     }
 
-    max_retries = 3
-    retry_delay = 2  # 初始重试延迟（秒）
+    max_retries = 4
+    retry_delay = 5
 
     for attempt in range(max_retries):
         try:
             print(f"发送请求...{f' (重试 {attempt})' if attempt > 0 else ''}")
             
-            # 使用带重试机制的http_client（如果可用）
-            if USE_HTTP_CLIENT:
-                response = http_post(URL, json=payload, headers=headers, timeout=120)
+            if _JD_IMG_SERIALIZE:
+                global _JD_IMG_LAST_AT
+                with _JD_IMG_LOCK:
+                    now = time.monotonic()
+                    delta = now - _JD_IMG_LAST_AT
+                    if delta < _JD_IMG_MIN_INTERVAL_S:
+                        time.sleep(_JD_IMG_MIN_INTERVAL_S - delta)
+                    _JD_IMG_LAST_AT = time.monotonic()
+
+                    if USE_HTTP_CLIENT:
+                        response = http_post(URL, json=payload, headers=headers, timeout=90)  # 90秒超时
+                    else:
+                        response = requests.post(URL, headers=headers, json=payload, timeout=90)  # 90秒超时
             else:
-                response = requests.post(URL, headers=headers, json=payload, timeout=120)
+                if USE_HTTP_CLIENT:
+                    response = http_post(URL, json=payload, headers=headers, timeout=90)  # 90秒超时
+                else:
+                    response = requests.post(URL, headers=headers, json=payload, timeout=90)  # 90秒超时
             
             print("HTTP", response.status_code)
-
-            # 处理429频率限制错误
-            if response.status_code == 429:
-                if attempt < max_retries - 1:
-                    wait_time = retry_delay * (2 ** attempt)  # 指数退避
-                    print(f"遇到频率限制(429)，等待 {wait_time} 秒后重试...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    print("频率限制(429)：已达最大重试次数")
-                    return None
 
             # 优先解析为 JSON，提取 base64 图片
             try:
@@ -389,10 +453,55 @@ def _generate_single_image(image_path: str, prompt: str) -> str:
                 print(response.text)
                 return None
 
+            should_retry, err = _should_retry_response(response.status_code, resp_json)
+            if should_retry:
+                if attempt < max_retries - 1:
+                    import random
+
+                    retry_after = response.headers.get("Retry-After")
+                    try:
+                        retry_after_s = int(retry_after) if retry_after is not None else None
+                    except Exception:
+                        retry_after_s = None
+
+                    wait_time = min(30, retry_delay * (2 ** attempt))
+                    if retry_after_s is not None:
+                        wait_time = max(wait_time, retry_after_s)
+                    wait_time += random.uniform(0, min(1.0, wait_time * 0.2))
+
+                    detail = ""
+                    if err and err.get("message"):
+                        detail = f"（{str(err.get('message'))[:200]}）"
+                    print(f"遇到可重试错误，等待 {wait_time:.1f} 秒后重试...{detail}")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    if err:
+                        print("可重试错误：已达最大重试次数")
+                        print(json.dumps({"error": err, "requestId": resp_json.get("requestId")}, ensure_ascii=False, indent=2))
+                    else:
+                        print("可重试错误：已达最大重试次数")
+                    return None
+
+            if response.status_code != 200:
+                err = _extract_api_error(resp_json)
+                if err:
+                    print("API 返回错误：")
+                    print(json.dumps({"error": err, "requestId": resp_json.get("requestId")}, ensure_ascii=False, indent=2))
+                else:
+                    print("API 返回非 200 响应：")
+                    print(json.dumps(resp_json, ensure_ascii=False, indent=2))
+                return None
+
             b64 = extract_generated_image_base64(resp_json)
             if not b64:
-                print("未在响应中找到生成图片的 base64 数据：")
-                print(json.dumps(resp_json, ensure_ascii=False, indent=2))
+                err = _extract_api_error(resp_json)
+                if err:
+                    print("API 返回错误：")
+                    print(json.dumps({"error": err, "requestId": resp_json.get("requestId")}, ensure_ascii=False, indent=2))
+                else:
+                    print("未在响应中找到生成图片的 base64 数据：")
+                    print(json.dumps(resp_json, ensure_ascii=False, indent=2))
                 return None
 
             # 保存到 output 目录
@@ -462,7 +571,7 @@ def main():
 
     try:
         print("发送请求...")
-        response = requests.post(URL, headers=headers, json=payload, timeout=120)
+        response = requests.post(URL, headers=headers, json=payload, timeout=90)  # 90秒超时
         print("HTTP", response.status_code)
 
         # 优先解析为 JSON，提取 base64 图片

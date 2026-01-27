@@ -11,6 +11,8 @@ import MessageArea from './MessageArea'
 import ChatInput from './ChatInput'
 import AnalysisPreview, { AnalysisResult } from './AnalysisPreview'
 import NoticeModal from './NoticeModal'
+import ThreeEditorModal from './ThreeEditorModal'
+import TwoDEditorModal from './TwoDEditorModal'
 
 
 // 队列状态类型
@@ -34,6 +36,8 @@ export default function ChatInterface() {
   const [renderPreviewUrl, setRenderPreviewUrl] = React.useState<string | null>(null)
   const [renderFilePath, setRenderFilePath] = React.useState<string | null>(null)
   const [threePrompt, setThreePrompt] = React.useState('')
+  const [twoDEditorOpen, setTwoDEditorOpen] = React.useState(false)
+  const [twoDBaseImageUrl, setTwoDBaseImageUrl] = React.useState<string | null>(null)
   // 队列状态
   const [queueInfo, setQueueInfo] = React.useState<QueueInfo | null>(null)
   const [currentJobId, setCurrentJobId] = React.useState<string | null>(null)
@@ -44,11 +48,55 @@ export default function ChatInterface() {
   const [generationMode, setGenerationMode] = React.useState<'2D' | '3D'>('3D')
   const [perspective, setPerspective] = React.useState<string>('正视角')
   const [pendingPrompt, setPendingPrompt] = React.useState<string>('')
+  const [runningLog, setRunningLog] = React.useState<string>('')
+  const [runningLogActive, setRunningLogActive] = React.useState(false)
 
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const pollTimerRef = useRef<number | null>(null)
   const scrollAnimationFrameRef = useRef<number | null>(null)
   const autoScrollRef = useRef<boolean>(true) // 控制是否自动滚动
+  const lastLogRef = useRef<string>('')
+  const runningLogHideTimerRef = useRef<number | null>(null)
+
+  const cancelRunningLogHide = () => {
+    if (runningLogHideTimerRef.current !== null) {
+      window.clearTimeout(runningLogHideTimerRef.current)
+      runningLogHideTimerRef.current = null
+    }
+  }
+
+  const scheduleRunningLogHide = (delayMs = 1000) => {
+    cancelRunningLogHide()
+    runningLogHideTimerRef.current = window.setTimeout(() => {
+      setRunningLogActive(false)
+      clearRunningLog()
+      runningLogHideTimerRef.current = null
+    }, delayMs)
+  }
+
+  const clearRunningLog = () => {
+    lastLogRef.current = ''
+    setRunningLog('')
+  }
+
+  const updateRunningLog = (nextLog: unknown) => {
+    if (typeof nextLog !== 'string') return
+    const trimmed = nextLog.trim()
+    if (!trimmed) return
+    if (trimmed === lastLogRef.current) return  // 跳过重复的日志
+    
+    lastLogRef.current = trimmed
+    
+    // 更新当前显示的日志（显示最新的）
+    setRunningLog(trimmed)
+  }
+
+  const handleThreeModalOpenChange = (nextOpen: boolean) => {
+    setThreeModalOpen(nextOpen)
+    if (!nextOpen) {
+      persistState(messages, input, selectedPresets)
+    }
+  }
 
   // 自动滚动到底部的函数
   const scrollToBottom = (smooth = true) => {
@@ -87,6 +135,19 @@ export default function ChatInterface() {
 
   // 是否显示分析预览（只在 preview 状态显示）
   const showAnalysisPreview = chatStatus === 'preview' && analysisResult !== null
+
+  const runningLogText =
+    runningLog ||
+    (queueInfo && queueInfo.position > 0
+      ? `排队中，预计等待 ${formatWaitTime(queueInfo.estimatedWait)}`
+      : chatStatus === 'analyzing'
+        ? '正在分析，请稍候...'
+        : chatStatus === 'preview'
+          ? '请确认分析结果后开始生成'
+          : isLoading || chatStatus === 'generating'
+            ? '后台处理中，请稍候...'
+            : '')
+  const showRunningLogBar = runningLogActive && !!runningLogText
 
   // 监听消息变化，自动滚动到底部
   useEffect(() => {
@@ -191,6 +252,7 @@ export default function ChatInterface() {
       clearInterval(pollTimerRef.current)
       pollTimerRef.current = null
     }
+    cancelRunningLogHide()
     const defaultInput = '我想生成一个 [表情] ， [动作] ，[场景] 的joy'
     setMessages([])
     setInput(defaultInput)
@@ -207,6 +269,8 @@ export default function ChatInterface() {
     setChatStatus('idle')
     setAnalysisResult(null)
     setPendingPrompt('')
+    setRunningLogActive(false)
+    clearRunningLog()
     persistState([], defaultInput, {}, 0)
     const key = getRouteKey()
     const el = scrollContainerRef.current
@@ -243,7 +307,7 @@ export default function ChatInterface() {
     const text = (overrideText ?? input).trim()
     if (!text || isLoading) return
 
-    if (threeModalOpen) setThreeModalOpen(false)
+    if (threeModalOpen) handleThreeModalOpenChange(false)
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -253,21 +317,49 @@ export default function ChatInterface() {
     }
 
     setMessages(prev => {
-      const updated = [...prev, userMessage]
+      const nextMessages: Message[] = [userMessage]
+
+      // 2D 底图存在时：若 prompt 仍包含表情/动作信息，则提示“底图已锁定动作表情”
+      if (generationMode === '2D' && twoDBaseImageUrl) {
+        const keywords = ['表情', '动作', '站姿', '站立', '坐姿', '跳跃', '跑动', '欢快', '开心', '[表情]', '[动作]']
+        const needHint = keywords.some(k => text.includes(k))
+        if (needHint) {
+          nextMessages.push({
+            id: `${Date.now()}-2d-base-hint`,
+            type: 'assistant',
+            content: '提示：底图已锁定动作表情，仅处理配件/背景',
+            timestamp: new Date()
+          })
+        }
+      }
+
+      const updated = [...prev, ...nextMessages]
       persistState(updated, '', selectedPresets)
       return updated
     })
     setInput('')
+    cancelRunningLogHide()
+    setRunningLogActive(true)
+    clearRunningLog()
     setIsLoading(true)
 
+    let requestId = ''
     try {
+      requestId =
+        globalThis.crypto?.randomUUID?.() ??
+        `${Date.now()}-${Math.random().toString(16).slice(2)}`
+
       if (renderFilePath) {
         const currentRenderPath = renderFilePath
         setRenderFilePath(null)
         setRenderPreviewUrl(null)
         setThreePrompt('')
 
-        const runRes = await axios.post('/api/run-3d-banana', { imagePath: currentRenderPath, promptText: text }, { timeout: 120000 })
+        const runRes = await axios.post(
+          '/api/run-3d-banana',
+          { imagePath: currentRenderPath, promptText: text },
+          { timeout: 0, headers: { 'X-Request-ID': requestId } }  // 取消超时限制
+        )
         if (runRes.data?.success && runRes.data?.url) {
           const assistantMessage: Message = {
             id: (Date.now() + 1).toString(),
@@ -301,16 +393,22 @@ export default function ChatInterface() {
           })
         }
         setIsLoading(false)
+        scheduleRunningLogHide()
         return
       }
 
-      // 第一步：分析内容（增加超时时间，因为后端可能有多次AI调用）
+      // 第一步：分析内容（异步轮询，避免网关/反代超时）
       setChatStatus('analyzing')
-      const analyzeRes = await axios.post('/api/analyze', {
-        requirement: text,
-        mode: generationMode,
-        perspective: generationMode === '2D' ? perspective : undefined
-      }, { timeout: 180000 })
+      const analyzeRes = await axios.post(
+        '/api/analyze',
+        {
+          requirement: text,
+          mode: generationMode,
+          perspective: generationMode === '2D' ? perspective : undefined,
+          async: true
+        },
+        { timeout: 0, headers: { 'X-Request-ID': requestId } }  // timeout: 0 表示无超时限制
+      )
 
       if (!analyzeRes.data?.success) {
         const needComplianceMsg = analyzeRes.data?.code === 'COMPLIANCE' || !analyzeRes.data?.compliant || String(analyzeRes.data?.reason || analyzeRes.data?.error || '').includes('违规')
@@ -330,24 +428,103 @@ export default function ChatInterface() {
         })
         setIsLoading(false)
         setChatStatus('idle')
+        scheduleRunningLogHide()
         return
       }
 
-      // 分析成功，显示预览
-      const analysis = analyzeRes.data.analysis as AnalysisResult
-      setAnalysisResult(analysis)
-      setPendingPrompt(text)
-      setChatStatus('preview')
-      setIsLoading(false)
+      // 兼容：如果后端直接返回 analysis（同步模式）
+      if (analyzeRes.data?.analysis) {
+        const analysis = analyzeRes.data.analysis as AnalysisResult
+        setAnalysisResult(analysis)
+        setPendingPrompt(text)
+        setChatStatus('preview')
+        setIsLoading(false)
+        return
+      }
+
+      const analyzeJobId = analyzeRes.data?.job_id as string | undefined
+      if (!analyzeJobId) {
+        throw new Error('分析任务启动失败: 缺少 job_id')
+      }
+
+      const deadline = Date.now() + 600000  // 10分钟超时
+      let retryCount = 0
+      const MAX_RETRIES = 400  // 最多重试 400 次（前30秒1秒间隔=30次，后9.5分钟2秒间隔=285次，总计约10分钟）
+      
+      while (true) {
+        retryCount++
+        
+        // 多重退出条件保护
+        if (Date.now() > deadline) {
+          console.error('分析超时: 超过时间限制')
+          throw new Error('分析超时，请稍后重试')
+        }
+        
+        if (retryCount > MAX_RETRIES) {
+          console.error('分析超时: 超过最大重试次数')
+          throw new Error('分析超时，请稍后重试')
+        }
+        
+        try {
+          const statusRes = await axios.get(`/api/job/${analyzeJobId}/status`, {
+            timeout: 0,  // 取消超时限制
+            headers: { 'X-Request-ID': requestId }
+          })
+          if (statusRes.data?.success) {
+            const job = statusRes.data.job as any
+            updateRunningLog(job?.latest_log)
+            if (job?.status === 'succeeded') {
+              const analysis = job.analysis as AnalysisResult
+              setComplianceError(false)
+              setAnalysisResult(analysis)
+              setPendingPrompt(text)
+              setChatStatus('preview')
+              setIsLoading(false)
+              return
+            }
+
+            if (job?.status === 'failed' || job?.status === 'cancelled') {
+              const reasonText = String(job?.details?.reason || job?.error || '未知错误')
+              const needComplianceMsg = job?.details?.code === 'COMPLIANCE' || reasonText.includes('不合规') || reasonText.includes('违规')
+              setComplianceError(!!needComplianceMsg)
+              const errorMessage: Message = {
+                id: (Date.now() + 1).toString(),
+                type: 'assistant',
+                content: needComplianceMsg ? '输入内容不符合规范，请重新描述你的需求' : `分析失败: ${reasonText}`,
+                timestamp: new Date()
+              }
+              setMessages(prev => {
+                const updated = [...prev, errorMessage]
+                persistState(updated, input, selectedPresets)
+                return updated
+              })
+              setIsLoading(false)
+              setChatStatus('idle')
+              scheduleRunningLogHide()
+              return
+            }
+          }
+        } catch (pollError) {
+          console.warn(`轮询第 ${retryCount} 次失败:`, pollError)
+          // ignore and retry
+        }
+
+        // 动态轮询间隔：前30秒每1秒检查一次，之后每2秒检查一次
+        const pollInterval = retryCount <= 30 ? 1000 : 2000
+        await new Promise(resolve => setTimeout(resolve, pollInterval))
+      }
 
     } catch (error: any) {
       let errorText = '分析失败: 未知错误'
-      if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+      if (error.code === 'ECONNABORTED' || error.message?.includes('timeout') || error.message?.includes('超时')) {
         errorText = '分析超时，请稍后重试'
       } else if (error?.response?.data?.error) {
         errorText = `分析失败: ${error.response.data.error}`
       } else if (error.message) {
         errorText = `错误: ${error.message}`
+      }
+      if (typeof requestId === 'string' && requestId) {
+        errorText = `${errorText} (request_id: ${requestId})`
       }
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -362,6 +539,7 @@ export default function ChatInterface() {
       })
       setIsLoading(false)
       setChatStatus('idle')
+      scheduleRunningLogHide()
     }
   }
 
@@ -369,16 +547,20 @@ export default function ChatInterface() {
   const handleConfirmAnalysis = async () => {
     if (!analysisResult || !pendingPrompt) return
 
+    cancelRunningLogHide()
+    setRunningLogActive(true)
     setIsLoading(true)
     setChatStatus('generating')
+    clearRunningLog()
 
     try {
       const startRes = await axios.post('/api/start_generate', {
         requirement: pendingPrompt,
         analysis: analysisResult,  // 传递用户确认/编辑后的分析结果
         mode: generationMode,
-        perspective: generationMode === '2D' ? perspective : undefined
-      }, { timeout: 60000 })
+        perspective: generationMode === '2D' ? perspective : undefined,
+        ...(generationMode === '2D' && twoDBaseImageUrl ? { base_image_url: twoDBaseImageUrl } : {})
+      }, { timeout: 0 })  // 取消超时限制
 
       if (!startRes.data?.success || !startRes.data?.job_id) {
         const needComplianceMsg = startRes.data?.code === 'COMPLIANCE' || String(startRes.data?.error || '').includes('违规')
@@ -398,6 +580,7 @@ export default function ChatInterface() {
         setChatStatus('idle')
         setAnalysisResult(null)
         setPendingPrompt('')
+        scheduleRunningLogHide()
         return
       }
 
@@ -418,9 +601,10 @@ export default function ChatInterface() {
 
       const checkStatus = async () => {
         try {
-          const res = await axios.get(`/api/job/${jobId}/status`, { timeout: 60000 })
+          const res = await axios.get(`/api/job/${jobId}/status`, { timeout: 0 })  // 取消超时限制
           if (!res.data?.success) return
           const job = res.data.job
+          updateRunningLog(job?.latest_log)
 
           // 更新队列信息
           if (job.queue_position > 0) {
@@ -456,6 +640,7 @@ export default function ChatInterface() {
               return updated
             })
             setIsLoading(false)
+            scheduleRunningLogHide()
           } else if (job.status === 'failed' || job.status === 'cancelled') {
             if (pollTimerRef.current) {
               clearInterval(pollTimerRef.current)
@@ -480,6 +665,7 @@ export default function ChatInterface() {
               return updated
             })
             setIsLoading(false)
+            scheduleRunningLogHide()
           }
         } catch (err) {
           // ignore
@@ -487,7 +673,30 @@ export default function ChatInterface() {
       }
 
       await checkStatus()
-      pollTimerRef.current = window.setInterval(checkStatus, 2500)
+      // 动态轮询间隔：前60秒每1秒检查一次，之后每2秒检查一次
+      let pollCount = 0
+      const dynamicPoll = async () => {
+        pollCount++
+        await checkStatus()
+        
+        // 根据轮询次数动态调整间隔
+        const nextInterval = pollCount <= 60 ? 1000 : 2000
+        
+        if (pollTimerRef.current) {
+          clearInterval(pollTimerRef.current)
+          pollTimerRef.current = window.setInterval(checkStatus, nextInterval)
+        }
+      }
+      
+      pollTimerRef.current = window.setInterval(checkStatus, 1000)  // 初始1秒间隔
+      
+      // 60秒后切换到2秒间隔
+      setTimeout(() => {
+        if (pollTimerRef.current) {
+          clearInterval(pollTimerRef.current)
+          pollTimerRef.current = window.setInterval(checkStatus, 2000)
+        }
+      }, 60000)
     } catch (error: any) {
       let errorText = '生成失败: 未知错误'
       if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
@@ -516,6 +725,7 @@ export default function ChatInterface() {
       setAnalysisResult(null)
       setPendingPrompt('')
       setIsLoading(false)
+      scheduleRunningLogHide()
     }
   }
 
@@ -525,6 +735,7 @@ export default function ChatInterface() {
     setAnalysisResult(null)
     setPendingPrompt('')
     setIsLoading(false)
+    scheduleRunningLogHide()
   }
 
   // 取消排队中的任务
@@ -539,6 +750,7 @@ export default function ChatInterface() {
       setQueueInfo(null)
       setCurrentJobId(null)
       setIsLoading(false)
+      scheduleRunningLogHide()
 
       const cancelMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -564,6 +776,7 @@ export default function ChatInterface() {
         clearInterval(pollTimerRef.current)
         pollTimerRef.current = null
       }
+      cancelRunningLogHide()
       if (el && typeof window !== 'undefined') {
         saveScrollPos(getRouteKey(), el.scrollTop)
       }
@@ -627,6 +840,12 @@ export default function ChatInterface() {
     return () => window.removeEventListener('message', onMessage)
   }, [])
 
+  // 切换视角/2D-3D 模式时，自动清空 2D 底图预览条（并关闭编辑器弹窗）
+  useEffect(() => {
+    setTwoDBaseImageUrl(null)
+    setTwoDEditorOpen(false)
+  }, [generationMode, perspective])
+
   useEffect(() => {
     const handler = () => {
       const el = scrollContainerRef.current
@@ -639,6 +858,32 @@ export default function ChatInterface() {
     window.addEventListener('popstate', handler)
     return () => window.removeEventListener('popstate', handler)
   }, [])
+
+  const TwoDBasePreview = () => {
+    if (generationMode !== '2D' || !twoDBaseImageUrl) return null
+    return (
+      <div className="flex items-center justify-center gap-2 py-2 px-4">
+        <span className="text-sm text-gray-300">已选择2D底图：</span>
+        <img
+          src={twoDBaseImageUrl}
+          alt="2D底图预览"
+          className="w-16 h-16 object-cover rounded border border-gray-600 bg-white"
+        />
+        <button
+          className="text-xs text-gray-400 hover:text-white ml-2"
+          onClick={() => setTwoDBaseImageUrl(null)}
+        >
+          清除
+        </button>
+        <button
+          className="text-xs text-gray-400 hover:text-white"
+          onClick={() => setTwoDEditorOpen(true)}
+        >
+          替换
+        </button>
+      </div>
+    )
+  }
 
   const RenderPreview = () => {
     if (!renderPreviewUrl || threeModalOpen) return null
@@ -696,69 +941,49 @@ export default function ChatInterface() {
   const handleThreeSend = async () => {
     if (!threePrompt.trim()) return
     if (!renderFilePath) return
-    setThreeModalOpen(false)
+    handleThreeModalOpenChange(false)
     setInput(threePrompt)
     setTimeout(() => handleSend(threePrompt), 100)
   }
 
-  const threeInputRef = useRef<HTMLInputElement>(null)
-
   return (
     <div className="h-screen w-full bg-gradient-to-b from-[#202020] to-[#1c2033] text-white overflow-hidden">
+      <ThreeEditorModal
+        open={threeModalOpen}
+        onOpenChange={handleThreeModalOpenChange}
+        renderPreviewUrl={renderPreviewUrl}
+        renderFilePath={renderFilePath}
+        threePrompt={threePrompt}
+        onThreePromptChange={setThreePrompt}
+        isLoading={isLoading}
+        onGenerate={handleThreeSend}
+      />
+      <TwoDEditorModal
+        open={twoDEditorOpen && generationMode === '2D'}
+        onOpenChange={setTwoDEditorOpen}
+        perspective={perspective}
+        onUse={(baseImageUrl) => setTwoDBaseImageUrl(baseImageUrl)}
+      />
       <div className="max-w-5xl mx-auto flex flex-col h-full min-h-0">
         {isInitial ? (
           <div className="flex-1 flex flex-col items-center justify-center px-4 overflow-y-auto">
             <h1 className="text-[36px] font-extrabold tracking-tight mb-6">创造你想要的JOY</h1>
             <div className="w-full max-w-[915px] relative">
-              {/* 3D Editor Modal - inline JSX to avoid re-render issues */}
-              {threeModalOpen && (
-                <div className="w-full mb-4">
-                  <div className="bg-[#0f1419] border border-gray-700 rounded-lg w-full max-w-[1000px] mx-auto overflow-hidden shadow-2xl" style={{ height: '1000px' }}>
-                    <div className="flex items-center justify-between px-3 py-2 border-b border-gray-700">
-                      <div className="text-sm text-gray-300">JOY 3D 编辑器</div>
-                      <button className="px-3 py-1 text-sm text-gray-300 hover:text-white hover:bg-gray-700 rounded" onClick={() => setThreeModalOpen(false)}>关闭</button>
-                    </div>
-                    <iframe src="/three-editor/index.html" title="3D Editor" className="w-full" style={{ height: 'calc(100% - 120px)' }} />
-                    <div className="px-4 py-3 border-t border-gray-700 bg-[#1a1d24]">
-                      <div className="flex items-center gap-3">
-                        {renderPreviewUrl && (
-                          <img src={renderPreviewUrl} alt="渲染预览" className="w-12 h-12 object-cover rounded border border-gray-600 flex-shrink-0" />
-                        )}
-                        <input
-                          ref={threeInputRef}
-                          type="text"
-                          value={threePrompt}
-                          onChange={e => setThreePrompt(e.target.value)}
-                          onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') handleThreeSend(); }}
-                          placeholder={renderFilePath ? "输入描述，然后点击生成" : "请先点击上方的开始渲染按钮"}
-                          className="flex-1 h-[44px] px-4 bg-[#2b2d33] text-white rounded-lg border border-gray-600 focus:border-purple-500 focus:outline-none placeholder:text-gray-500"
-                        />
-                        <button
-                          onClick={handleThreeSend}
-                          disabled={!renderFilePath || !threePrompt.trim() || isLoading}
-                          className="h-[44px] px-6 bg-gradient-to-r from-[#d580ff] to-[#a6ccfd] text-white rounded-lg font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
-                        >
-                          {isLoading ? '生成中...' : '生成'}
-                        </button>
-                      </div>
-                      <div className="text-xs text-gray-500 mt-2">
-                        {renderFilePath ? '✓ 渲染图已准备好，输入描述后点击生成' : '⚠ 请先在编辑器中点击开始渲染按钮'}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
+              <TwoDBasePreview />
               <RenderPreview />
               <ChatInput
                 input={input}
                 setInput={setInput}
                 handleSend={handleSend}
-                isLoading={isLoading}
-                insertPreset={insertPreset}
-                variant="center"
-                onOpenThreeTest={() => setThreeModalOpen(true)}
-                generationMode={generationMode}
-                setGenerationMode={setGenerationMode}
+	                isLoading={isLoading}
+	                insertPreset={insertPreset}
+                  runningLogVisible={showRunningLogBar}
+                  runningLogText={runningLogText}
+	                variant="center"
+	                onOpenThreeTest={() => handleThreeModalOpenChange(true)}
+                  onOpenTwoDEditor={() => setTwoDEditorOpen(true)}
+	                generationMode={generationMode}
+	                setGenerationMode={setGenerationMode}
                 perspective={perspective}
                 setPerspective={setPerspective}
               />
@@ -806,56 +1031,22 @@ export default function ChatInterface() {
             </div>
 
             <div className="relative">
-              {/* 3D Editor Modal - inline JSX to avoid re-render issues */}
-              {threeModalOpen && (
-                <div className="w-full mb-4">
-                  <div className="bg-[#0f1419] border border-gray-700 rounded-lg w-full max-w-[1000px] mx-auto overflow-hidden shadow-2xl" style={{ height: '1000px' }}>
-                    <div className="flex items-center justify-between px-3 py-2 border-b border-gray-700">
-                      <div className="text-sm text-gray-300">JOY 3D 编辑器</div>
-                      <button className="px-3 py-1 text-sm text-gray-300 hover:text-white hover:bg-gray-700 rounded" onClick={() => setThreeModalOpen(false)}>关闭</button>
-                    </div>
-                    <iframe src="/three-editor/index.html" title="3D Editor" className="w-full" style={{ height: 'calc(100% - 120px)' }} />
-                    <div className="px-4 py-3 border-t border-gray-700 bg-[#1a1d24]">
-                      <div className="flex items-center gap-3">
-                        {renderPreviewUrl && (
-                          <img src={renderPreviewUrl} alt="渲染预览" className="w-12 h-12 object-cover rounded border border-gray-600 flex-shrink-0" />
-                        )}
-                        <input
-                          ref={threeInputRef}
-                          type="text"
-                          value={threePrompt}
-                          onChange={e => setThreePrompt(e.target.value)}
-                          onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') handleThreeSend(); }}
-                          placeholder={renderFilePath ? "输入描述，然后点击生成" : "请先点击上方的开始渲染按钮"}
-                          className="flex-1 h-[44px] px-4 bg-[#2b2d33] text-white rounded-lg border border-gray-600 focus:border-purple-500 focus:outline-none placeholder:text-gray-500"
-                        />
-                        <button
-                          onClick={handleThreeSend}
-                          disabled={!renderFilePath || !threePrompt.trim() || isLoading}
-                          className="h-[44px] px-6 bg-gradient-to-r from-[#d580ff] to-[#a6ccfd] text-white rounded-lg font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
-                        >
-                          {isLoading ? '生成中...' : '生成'}
-                        </button>
-                      </div>
-                      <div className="text-xs text-gray-500 mt-2">
-                        {renderFilePath ? '✓ 渲染图已准备好，输入描述后点击生成' : '⚠ 请先在编辑器中点击开始渲染按钮'}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-              <RenderPreview />
-              <ChatInput
-                input={input}
-                setInput={setInput}
-                handleSend={handleSend}
-                isLoading={isLoading}
-                insertPreset={insertPreset}
-                onOpenThreeTest={() => setThreeModalOpen(true)}
-                variant="center"
-                generationMode={generationMode}
-                setGenerationMode={setGenerationMode}
-                perspective={perspective}
+		              <TwoDBasePreview />
+		              <RenderPreview />
+		              <ChatInput
+		                input={input}
+		                setInput={setInput}
+		                handleSend={handleSend}
+		                isLoading={isLoading}
+	                insertPreset={insertPreset}
+	                onOpenThreeTest={() => handleThreeModalOpenChange(true)}
+                  onOpenTwoDEditor={() => setTwoDEditorOpen(true)}
+                  runningLogVisible={showRunningLogBar}
+                  runningLogText={runningLogText}
+	                variant="center"
+	                generationMode={generationMode}
+	                setGenerationMode={setGenerationMode}
+	                perspective={perspective}
                 setPerspective={setPerspective}
               />
             </div>

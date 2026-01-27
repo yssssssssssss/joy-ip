@@ -88,7 +88,7 @@ class ImageUploader:
             result = subprocess.run(
                 ['python', self.upload_script, file_path, custom_name],
                 cwd=self.cwd,
-                timeout=60,  # 上传超时60秒
+                timeout=90,  # 90秒超时
                 capture_output=True,
                 text=True
             )

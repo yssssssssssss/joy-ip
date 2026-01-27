@@ -216,10 +216,11 @@ def parse_all_texts(obj: dict) -> list[str]:
 def run_gemini_flash_generation(image_path: str, prompt_text: str) -> str:
     """调用 /v1/images/gemini_flash/generations 接口，返回合并的文本。"""
     url = "https://modelservice.jdcloud.com/v1/images/gemini_flash/generations"
+    bearer_token = os.environ.get("AI_API_KEY", "")
     headers = {
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate, br",
-        "Authorization": "Bearer pk-a3b4d157-e765-45b9-988a-b8b2a6d7c8bf",
+        "Authorization": f"Bearer {bearer_token}",
         "Connection": "keep-alive",
         "Content-Type": "application/json",
         "Trace-id": "gate-result-single",
@@ -238,7 +239,7 @@ def run_gemini_flash_generation(image_path: str, prompt_text: str) -> str:
     payload = build_payload_gemini_flash(prompt_text, mime_type, base64_data)
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        response = requests.post(url, headers=headers, json=payload, timeout=90)  # 90秒超时
         try:
             resp_json = response.json()
             texts = parse_all_texts(resp_json)
@@ -389,7 +390,7 @@ def call_analysis_api(image_path, model_name, prompt_text):
     调用大模型API对图片进行分析。
     """
     api_url = "https://modelservice.jdcloud.com/v1/chat/completions"
-    bearer_token = "pk-a3b4d157-e765-45b9-988a-b8b2a6d7c8bf"
+    bearer_token = os.environ.get("AI_API_KEY", "")
 
     headers = {
         "Accept": "*/*",
@@ -427,7 +428,7 @@ def call_analysis_api(image_path, model_name, prompt_text):
     }
 
     try:
-        response = requests.post(api_url, headers=headers, json=data, timeout=60)
+        response = requests.post(api_url, headers=headers, json=data, timeout=90)  # 90秒超时
         response.raise_for_status()
         json_response = response.json()
 
@@ -471,7 +472,7 @@ def judge_abnormalities_by_llm(analysis_results, judge_model_name="Gemini-2.5-pr
     {"status":"abnormal|normal","reason":"...","abnormal_models":["模型A","模型B"]}
     """
     api_url = "https://modelservice.jdcloud.com/v1/chat/completions"
-    bearer_token = "pk-a3b4d157-e765-45b9-988a-b8b2a6d7c8bf"
+    bearer_token = os.environ.get("AI_API_KEY", "")
     headers = {
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate, br",
@@ -524,7 +525,7 @@ def judge_abnormalities_by_llm(analysis_results, judge_model_name="Gemini-2.5-pr
     }
 
     try:
-        response = requests.post(api_url, headers=headers, json=data, timeout=60)
+        response = requests.post(api_url, headers=headers, json=data, timeout=90)  # 90秒超时
         response.raise_for_status()
         resp_json = response.json()
         content_text = extract_text_from_response(resp_json, model_name=judge_model_name)

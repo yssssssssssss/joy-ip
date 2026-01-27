@@ -8,7 +8,7 @@
     "build": "next build",
     "lint": "next lint",
     "export": "next build && xcopy /E /Y out ..\\frontend_dist\\",
-    "export:unix": "next build && cp -r out ../frontend_dist"
+    "export:unix": "NODE_OPTIONS=--require=./scripts/rename-exdev-fix.cjs next build && cp -r out/. ../frontend_dist/"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.0.4",

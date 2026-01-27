@@ -20,6 +20,10 @@ const nextConfig = {
         source: '/generated_images/:path*',
         destination: `${backendOrigin}/generated_images/:path*`,
       },
+      {
+        source: '/data/2d/:path*',
+        destination: `${backendOrigin}/data/2d/:path*`,
+      },
     ]
   },
 }

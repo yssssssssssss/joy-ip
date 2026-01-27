@@ -123,7 +123,7 @@ def parallel_process(items: List[Any], process_func: Callable,
         for future in future_to_idx:
             idx = future_to_idx[future]
             try:
-                results[idx] = future.result(timeout=120)
+                results[idx] = future.result(timeout=90)  # 90秒超时
             except Exception as e:
                 logger.warning(f"并行处理任务 {idx} 失败: {e}")
                 results[idx] = None
@@ -157,7 +157,7 @@ def parallel_process_with_args(tasks: List[Tuple[Callable, Tuple]],
         for future in future_to_idx:
             idx = future_to_idx[future]
             try:
-                results[idx] = future.result(timeout=120)
+                results[idx] = future.result(timeout=90)  # 90秒超时
             except Exception as e:
                 logger.warning(f"并行处理任务 {idx} 失败: {e}")
                 results[idx] = None

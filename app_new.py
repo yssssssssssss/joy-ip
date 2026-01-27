@@ -15,7 +15,7 @@ import time
 import uuid
 from typing import Dict
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, g
 from flask_cors import CORS
 
 from matchers.head_matcher import HeadMatcher
@@ -29,6 +29,7 @@ from utils.generation_log import log_generation
 # 2D素材生成相关导入
 from content_agent_2d import ContentAgent2D
 from generation_controller_2d import GenerationController2D
+from utils.http_client import http_post
 
 # 获取配置
 config = get_config()
@@ -94,6 +95,77 @@ if config.CORS_ENABLED:
     logger.info(f"CORS已启用，允许的源: {config.CORS_ORIGINS}")
 else:
     logger.info("CORS已禁用（单端口模式）")
+
+
+def _get_request_id() -> str:
+    rid = request.headers.get('X-Request-ID') or request.headers.get('X-Request-Id')
+    if isinstance(rid, str):
+        rid = rid.strip()
+    if rid:
+        return rid[:128]
+    return uuid.uuid4().hex
+
+
+def _get_client_ip() -> str:
+    xff = request.headers.get('X-Forwarded-For')
+    if isinstance(xff, str) and xff.strip():
+        return xff.split(',')[0].strip()
+    return request.remote_addr or ''
+
+
+@app.before_request
+def _assign_request_context():
+    g.request_start_time = time.time()
+    g.request_id = _get_request_id()
+
+
+@app.after_request
+def _log_and_tag_response(response):
+    rid = getattr(g, 'request_id', None)
+    start = getattr(g, 'request_start_time', None)
+    duration_ms = None
+    if isinstance(start, (int, float)):
+        duration_ms = int((time.time() - start) * 1000)
+
+    if rid:
+        response.headers.setdefault('X-Request-ID', rid)
+    if duration_ms is not None:
+        response.headers['X-Process-Time-Ms'] = str(duration_ms)
+        response.headers['Server-Timing'] = f"app;dur={duration_ms}"
+
+    try:
+        path = request.path
+        if (
+            path.startswith('/api/')
+            and not (path.startswith('/api/job/') and path.endswith('/status'))
+        ):
+            ip = _get_client_ip()
+            logger.info(
+                f"[rid={rid}] {request.method} {path} -> {response.status_code} "
+                f"{duration_ms if duration_ms is not None else '-'}ms ip={ip}"
+            )
+    except Exception:
+        pass
+
+    try:
+        if config.SINGLE_PORT_MODE:
+            path = request.path or '/'
+            is_frontend_html = (
+                response.mimetype == 'text/html'
+                and not path.startswith('/api/')
+                and not path.startswith('/_next/')
+                and not path.startswith('/output/')
+                and not path.startswith('/generated_images/')
+                and not path.startswith('/data/2d/')
+            )
+            if is_frontend_html:
+                response.headers['Cache-Control'] = 'no-store, max-age=0'
+                response.headers['Pragma'] = 'no-cache'
+                response.headers['Expires'] = '0'
+    except Exception:
+        pass
+
+    return response
 
 # 创建全局实例
 head_matcher = HeadMatcher()
@@ -235,6 +307,7 @@ def _run_generation_job(job_id: str, requirement: str):
         mode = job_data.get('mode', '3D') if job_data else '3D'
         perspective = job_data.get('perspective', '正视角') if job_data else '正视角'
         pre_analysis = job_data.get('pre_analysis') if job_data else None
+        base_image_path = job_data.get('base_image_path') if job_data else None
         
         logger.info(f"[Job {job_id}] 生成模式: {mode}, 视角: {perspective}")
         
@@ -242,13 +315,19 @@ def _run_generation_job(job_id: str, requirement: str):
         if mode == '2D':
             _append_log(job_id, f"使用2D素材生成流程，视角: {perspective}")
             logger.info(f"[Job {job_id}] 开始2D生成流程")
+            if base_image_path:
+                _append_log(job_id, "检测到2D底图，将跳过头/身匹配与拼装步骤")
             
             # 创建2D生成控制器
             controller_2d = GenerationController2D()
             
             # 调用2D完整生成流程（传入预分析结果）
             result = controller_2d.generate_complete_flow(
-                requirement, perspective, output_dir="output", pre_analysis=pre_analysis
+                requirement,
+                perspective,
+                output_dir="output",
+                pre_analysis=pre_analysis,
+                base_image_path=base_image_path
             )
             
             if result.get('success') and result.get('images'):
@@ -442,6 +521,167 @@ def serve_generated_image(filename):
     return send_from_directory('generated_images', filename)
 
 
+# =========================
+# 2D 素材静态访问与编辑器接口
+# =========================
+
+@app.route('/data/2d/<path:filename>')
+def serve_2d_asset(filename):
+    """提供 data/2d 下的 2D 素材静态文件访问（仅允许 png）"""
+    try:
+        safe_name = str(filename or '').replace('\\', '/').strip()
+        if not safe_name or safe_name.startswith('/') or '..' in safe_name.split('/'):
+            return ('', 404)
+        if not safe_name.lower().endswith('.png'):
+            return ('', 404)
+        return send_from_directory(os.path.join('data', '2d'), safe_name)
+    except Exception:
+        return ('', 404)
+
+
+def _normalize_relative_url_path(url_path: str) -> str:
+    if not isinstance(url_path, str):
+        return ''
+    p = url_path.strip()
+    if not p:
+        return ''
+    if '://' in p:
+        return ''
+    p = p.split('?', 1)[0].split('#', 1)[0]
+    p = p.replace('\\', '/')
+    if p.startswith('/'):
+        p = p[1:]
+    p = os.path.normpath(p).replace('\\', '/')
+    if p in ('.', ''):
+        return ''
+    if p == '..' or p.startswith('../'):
+        return ''
+    if '..' in p.split('/'):
+        return ''
+    return p
+
+
+def _safe_local_path_from_url(url_path: str, allowed_prefix: str) -> str:
+    rel = _normalize_relative_url_path(url_path)
+    if not rel:
+        return ''
+    prefix = allowed_prefix.strip('/').rstrip('/')
+    if not rel.startswith(prefix + '/'):
+        return ''
+    return rel
+
+
+@app.route('/api/2d_assets', methods=['GET'])
+def list_2d_assets():
+    """按视角/类型/动作列出 2D 素材（文件名排序）"""
+    try:
+        perspective = (request.args.get('perspective') or '正视角').strip()
+        asset_type = (request.args.get('type') or '').strip().lower()
+        action_type = (request.args.get('action') or '').strip()
+
+        perspective_dir = {'正视角': 'frontview', '仰视角': 'upview'}.get(perspective)
+        if not perspective_dir:
+            return jsonify({'success': False, 'error': '无效的 perspective'}), 400
+
+        if asset_type not in ('head', 'body'):
+            return jsonify({'success': False, 'error': '无效的 type（仅支持 head/body）'}), 400
+
+        if asset_type == 'head':
+            folder = os.path.join('data', '2d', perspective_dir, 'head')
+            url_prefix = f"/data/2d/{perspective_dir}/head"
+        else:
+            action_folder_map = {
+                '站姿': 'body_stand',
+                '欢快': 'body_happy',
+                '跳跃': 'body_jump',
+                '跑动': 'body_run',
+                '坐姿': 'body_sit',
+            }
+            folder_name = action_folder_map.get(action_type)
+            if not folder_name:
+                return jsonify({'success': False, 'error': '无效的 action'}), 400
+            folder = os.path.join('data', '2d', perspective_dir, folder_name)
+            url_prefix = f"/data/2d/{perspective_dir}/{folder_name}"
+
+        if not os.path.exists(folder):
+            return jsonify({'success': False, 'error': f'素材目录不存在: {folder}'}), 404
+
+        names = []
+        for name in os.listdir(folder):
+            if not isinstance(name, str):
+                continue
+            if name.lower().endswith('.png'):
+                names.append(name)
+        names.sort()
+
+        items = [{'name': name, 'url': f"{url_prefix}/{name}"} for name in names]
+        return jsonify({'success': True, 'items': items})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/2d_editor/compose', methods=['POST'])
+def compose_2d_editor_image():
+    """2D 编辑器拼装接口：给定 head/body 素材，调用 per-data-2D.py 输出透底预览(2000x2000) + 白底底图(1024x1200)"""
+    try:
+        data = request.get_json() or {}
+        head_url = data.get('head_url') or ''
+        body_url = data.get('body_url') or ''
+        action_type = (data.get('action_type') or '站姿').strip()
+
+        allowed_actions = {'站姿', '欢快', '跳跃', '跑动', '坐姿'}
+        if action_type not in allowed_actions:
+            return jsonify({'success': False, 'error': '无效的 action_type'}), 400
+
+        head_path = _safe_local_path_from_url(head_url, 'data/2d')
+        body_path = _safe_local_path_from_url(body_url, 'data/2d')
+        if not head_path or not body_path:
+            return jsonify({'success': False, 'error': '无效的素材路径'}), 400
+        if not head_path.lower().endswith('.png') or not body_path.lower().endswith('.png'):
+            return jsonify({'success': False, 'error': '仅支持 png 素材'}), 400
+        if not os.path.exists(head_path) or not os.path.exists(body_path):
+            return jsonify({'success': False, 'error': '素材文件不存在'}), 404
+
+        from utils.module_loader import ModuleLoader
+        per_data_2d = ModuleLoader.load('per-data-2D.py')
+        if not per_data_2d or not hasattr(per_data_2d, 'compose_images_new_logic'):
+            return jsonify({'success': False, 'error': 'per-data-2D.py 模块不可用'}), 500
+
+        out_dir = os.path.join('output', '2d_editor')
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"2d_editor_{uuid.uuid4().hex}.png")
+
+        result_path = per_data_2d.compose_images_new_logic(
+            body_path, head_path, out_path, action_type=action_type
+        )
+
+        preview_path = out_path
+        if not os.path.exists(preview_path):
+            return jsonify({'success': False, 'error': '拼装失败'}), 500
+
+        base_path = None
+        if isinstance(result_path, str) and os.path.exists(result_path):
+            base_path = result_path
+
+        expected_white_bg_path = f"{os.path.splitext(out_path)[0]}_white_bg.png"
+        if not base_path or not base_path.lower().endswith('_white_bg.png'):
+            if os.path.exists(expected_white_bg_path):
+                base_path = expected_white_bg_path
+            elif hasattr(per_data_2d, 'create_white_background_image'):
+                created_path = per_data_2d.create_white_background_image(preview_path, out_dir)
+                if isinstance(created_path, str) and os.path.exists(created_path):
+                    base_path = created_path
+
+        if not base_path or not os.path.exists(base_path):
+            return jsonify({'success': False, 'error': '白底图生成失败'}), 500
+
+        preview_url = f"/{preview_path.replace(os.sep, '/')}"
+        base_image_url = f"/{base_path.replace(os.sep, '/')}"
+        return jsonify({'success': True, 'url': base_image_url, 'base_image_url': base_image_url, 'preview_url': preview_url})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/start_generate', methods=['POST'])
 def start_generate():
     """
@@ -464,6 +704,7 @@ def start_generate():
         data = request.get_json() or {}
         requirement = data.get('requirement', '')
         pre_analysis = data.get('analysis', None)  # 预分析结果（可选）
+        base_image_url = data.get('base_image_url', None)  # 2D底图（可选）
         
         logger.info(f"请求参数: requirement='{requirement}'")
         if pre_analysis:
@@ -484,10 +725,20 @@ def start_generate():
         
         # 存储模式和视角信息到任务中
         _update_job(job_id, mode=mode, perspective=perspective)
-        
+
+        # 2D 编辑器底图（可选）
+        base_image_path = None
+        if base_image_url:
+            base_image_path = _safe_local_path_from_url(str(base_image_url), 'output')
+            if not base_image_path or not base_image_path.lower().endswith('.png') or not os.path.exists(base_image_path):
+                return jsonify({'success': False, 'error': '无效的 base_image_url'}), 400
+            _update_job(job_id, base_image_url=str(base_image_url), base_image_path=base_image_path)
+
         # 如果有预分析结果，存储到任务中
         if pre_analysis:
             _update_job(job_id, pre_analysis=pre_analysis)
+
+        _append_log(job_id, "任务已创建，准备进入队列")
         
         # 提交到执行队列
         submit_result = _submit_job(job_id, requirement)
@@ -497,6 +748,13 @@ def start_generate():
                 'success': False, 
                 'error': submit_result.get('error', '队列已满')
             }), 503
+
+        queue_position = submit_result.get('queue_position', 0)
+        estimated_wait = submit_result.get('estimated_wait', 0)
+        if queue_position > 0:
+            _append_log(job_id, f"排队中，当前位置 {queue_position}，预计等待 {estimated_wait} 秒")
+        else:
+            _append_log(job_id, "任务已开始执行")
         
         # 获取队列统计
         queue_stats = job_manager.get_queue_stats()
@@ -504,8 +762,8 @@ def start_generate():
         response_data = {
             'success': True, 
             'job_id': job_id,
-            'queue_position': submit_result.get('queue_position', 0),
-            'estimated_wait': submit_result.get('estimated_wait', 0),
+            'queue_position': queue_position,
+            'estimated_wait': estimated_wait,
             'queue_stats': queue_stats
         }
         logger.info(f"✓ 任务已提交: job_id={job_id}, 队列位置={submit_result.get('queue_position')}, 预估等待={submit_result.get('estimated_wait')}秒")
@@ -1444,6 +1702,32 @@ def save_render():
         }), 500
 
 
+@app.route('/api/gemini_flash/generations', methods=['POST'])
+def gemini_flash_generations():
+    try:
+        if not getattr(config, "AI_API_KEY", ""):
+            return jsonify({"error": "AI_API_KEY 未设置"}), 500
+
+        data = request.get_json() or {}
+        url = "https://modelservice.jdcloud.com/v1/images/gemini_flash/generations"
+        headers = {
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Authorization": f"Bearer {config.AI_API_KEY}",
+            "Connection": "keep-alive",
+            "Content-Type": "application/json",
+            "User-Agent": "JoyIP-3D-System/1.0",
+        }
+        resp = http_post(url, json=data, headers=headers, timeout=180)
+        try:
+            return jsonify(resp.json()), resp.status_code
+        except Exception:
+            return resp.text, resp.status_code
+    except Exception as e:
+        logger.error(f"gemini_flash_generations API 错误: {str(e)}", exc_info=True)
+        return jsonify({"error": f"请求失败: {str(e)}"}), 500
+
+
 # ============================================
 # 生成历史查询 API
 # ============================================
@@ -1555,6 +1839,7 @@ def analyze():
     start_time = time.time()
     
     try:
+        rid = getattr(g, 'request_id', None)
         data = request.get_json()
         requirement = data.get('requirement', '')
         mode = data.get('mode', '3D')  # 默认3D模式
@@ -1562,8 +1847,8 @@ def analyze():
         is_async = data.get('async', False)  # 是否异步处理
         
         logger.info(f"=== 收到 analyze 请求 ===")
-        logger.info(f"请求来源: {request.remote_addr}")
-        logger.info(f"请求参数: requirement='{requirement}', mode='{mode}', perspective='{perspective}', async={is_async}")
+        logger.info(f"[rid={rid}] 请求来源: {request.remote_addr}")
+        logger.info(f"[rid={rid}] 请求参数: requirement='{requirement}', mode='{mode}', perspective='{perspective}', async={is_async}")
         logger.info(f"请求开始时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time))}")
         
         if not requirement:
@@ -1574,50 +1859,94 @@ def analyze():
         
         # 异步处理模式
         if is_async:
-            job_id = str(uuid.uuid4())
-            logger.info(f"启动异步分析任务: {job_id}")
-            
-            def async_analyze():
+            job_id = _init_job(requirement)
+            _update_job(job_id, mode=mode, perspective=perspective, stage='analyze_preview', progress=0)
+            _append_log(job_id, f"收到分析请求: {requirement}")
+            logger.info(f"[rid={rid}] 启动异步分析任务: job_id={job_id}")
+
+            def async_analyze_job():
+                job_start = time.time()
                 try:
+                    _update_job(job_id, status='running', stage='analyze_preview', progress=5)
+
                     # 根据模式选择不同的内容分析器
                     if mode == '2D':
-                        logger.info("使用2D内容分析器")
+                        logger.info(f"[rid={rid}] [Job {job_id}] 使用2D内容分析器")
                         content_agent_2d = ContentAgent2D()
                         result = content_agent_2d.process_content_2d(requirement, perspective)
                     else:
-                        logger.info("使用3D内容分析器")
+                        logger.info(f"[rid={rid}] [Job {job_id}] 使用3D内容分析器")
                         result = content_agent.process_content(requirement)
-                    
+
                     # 对返回的分析结果进行清洗
                     if result.get('analysis'):
                         result['analysis'] = sanitize_analysis_result(result['analysis'])
-                    
-                    end_time = time.time()
-                    processing_time = end_time - start_time
-                    logger.info(f"异步分析完成，耗时: {processing_time:.2f}秒")
-                    
-                    # 保存结果到任务状态
+
+                    processing_time = time.time() - job_start
                     result['processing_time'] = round(processing_time, 2)
-                    job_manager.update_job_status(job_id, 'completed', result=result)
-                    
+
+                    # 合规失败：作为 failed 任务返回，前端可读 error/details
+                    if not result.get('success') or not result.get('compliant', True):
+                        reason = result.get('reason') or result.get('error') or '内容不合规'
+                        error_msg = f"内容不合规: {reason}"
+                        _update_job(
+                            job_id,
+                            status='failed',
+                            stage='analyze_preview',
+                            progress=100,
+                            error=error_msg,
+                            analysis=None,
+                            details={
+                                'type': 'analysis',
+                                'code': 'COMPLIANCE',
+                                'compliant': False,
+                                'reason': reason,
+                                'processing_time': round(processing_time, 2),
+                            }
+                        )
+                        _append_log(job_id, f"分析不合规: {reason}")
+                        logger.info(f"[rid={rid}] [Job {job_id}] 异步分析不合规，耗时: {processing_time:.2f}秒")
+                        return
+
+                    analysis = result.get('analysis') or {}
+                    _update_job(
+                        job_id,
+                        status='succeeded',
+                        stage='analyze_preview',
+                        progress=100,
+                        analysis=analysis,
+                        details={
+                            'type': 'analysis',
+                            'compliant': True,
+                            'reason': '',
+                            'processing_time': round(processing_time, 2),
+                        }
+                    )
+                    _append_log(job_id, f"分析完成，耗时 {processing_time:.2f} 秒")
+                    logger.info(f"[rid={rid}] [Job {job_id}] 异步分析完成，耗时: {processing_time:.2f}秒")
+
                 except Exception as e:
-                    end_time = time.time()
-                    processing_time = end_time - start_time
-                    logger.error(f"异步分析失败 (耗时: {processing_time:.2f}秒): {str(e)}", exc_info=True)
-                    job_manager.update_job_status(job_id, 'failed', error=str(e))
-            
-            # 启动后台任务
+                    processing_time = time.time() - job_start
+                    logger.error(
+                        f"[rid={rid}] [Job {job_id}] 异步分析失败 (耗时: {processing_time:.2f}秒): {str(e)}",
+                        exc_info=True
+                    )
+                    _update_job(
+                        job_id,
+                        status='failed',
+                        stage='analyze_preview',
+                        progress=100,
+                        error=str(e),
+                        details={
+                            'type': 'analysis',
+                            'processing_time': round(processing_time, 2),
+                        }
+                    )
+                    _append_log(job_id, f"分析失败: {str(e)}")
+
             import threading
-            thread = threading.Thread(target=async_analyze)
-            thread.daemon = True
+            thread = threading.Thread(target=async_analyze_job, daemon=True)
             thread.start()
-            
-            # 立即返回任务ID
-            job_manager.create_job(job_id, 'analyzing', {
-                'requirement': requirement,
-                'mode': mode,
-                'perspective': perspective
-            })
             
             return jsonify({
                 'success': True,

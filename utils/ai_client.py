@@ -64,7 +64,7 @@ class AIClient:
                 self.api_url,
                 headers=self.headers,
                 json=payload,
-                timeout=30
+                timeout=90  # 90秒超时
             )
             
             # 检查响应
