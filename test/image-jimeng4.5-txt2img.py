@@ -114,7 +114,7 @@ def main() -> int:
     parser.add_argument("--prompt", default="一只可爱的猫")
     parser.add_argument("--model", default="doubao-seedream-4-5-251128")
     parser.add_argument("--url", default=_get_env("JIMENG_IMAGE_API_URL", "VITE_GEMINI_IMAGE_API_URL") or "https://modelservice.jdcloud.com/v1/imageEdit/generations")
-    parser.add_argument("--api-key", default=_get_env("GEMINI_API_KEY", "VITE_GEMINI_API_KEY", "DOUBAO_IMAGE_API_KEY") or "")
+    parser.add_argument("--api-key", default=_get_env("GEMINI_API_KEY", "VITE_GEMINI_API_KEY", "DOUBAO_IMAGE_API_KEY", "AI_API_KEY") or "")
     parser.add_argument("--image", default="")
     parser.add_argument("--out", default="doubao_output.png")
     args = parser.parse_args()

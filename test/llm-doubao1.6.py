@@ -83,7 +83,7 @@ def main() -> int:
     parser.add_argument("--model", default="doubao-seed-1-6-thinking-250715")
     parser.add_argument("--system", default="You are a helpful AI assistant. Please answer in Chinese.")
     parser.add_argument("--url", default=_get_env("TEXT_MODEL_API_URL", "VITE_TEXT_MODEL_API_URL") or "https://modelservice.jdcloud.com/v1/chat/completions")
-    parser.add_argument("--api-key", default=_get_env("TEXT_MODEL_API_KEY", "VITE_TEXT_MODEL_API_KEY") or "")
+    parser.add_argument("--api-key", default=_get_env("TEXT_MODEL_API_KEY", "VITE_TEXT_MODEL_API_KEY", "AI_API_KEY") or "")
     args = parser.parse_args()
 
     payload = {
