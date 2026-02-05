@@ -68,9 +68,9 @@ export default function MessageArea({
                       className="relative group cursor-pointer"
                       onMouseEnter={() => setHoveredImage(img)}
                       onMouseLeave={() => setHoveredImage(null)}
-                      onClick={() => handleImageClick(img)}
+                  onClick={() => handleImageClick(img)}
                     >
-                      <img src={img} alt="Generated Image" className="rounded-lg" />
+                      <img src={img} alt="Generated Image" className={`rounded-lg ${msg.mode === '2D' ? 'bg-white' : ''}`} />
                       {hoveredImage === img && (
                         <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center rounded-lg">
                           <button
@@ -116,10 +116,6 @@ export default function MessageArea({
                   取消排队
                 </button>
               )}
-            </div>
-            {/* 进度条动画 */}
-            <div className="mt-3 h-1 bg-gray-700 rounded-full overflow-hidden">
-              <div className="h-full bg-gradient-to-r from-purple-500 to-blue-500 rounded-full animate-pulse" style={{ width: '30%' }} />
             </div>
           </div>
         )}

@@ -344,7 +344,7 @@ export default function TwoDEditorModal({
                 取消
               </button>
               <div className="ml-auto text-[11px] text-gray-500">
-                预览为透底 2000×2000；点击“使用”后将以白底 1024×1200 作为底图进入后续流程
+                预览为透底 2000×2000；点击“使用”后将以灰底 1024×1200 作为底图进入后续流程
               </div>
             </div>
           </div>

@@ -220,17 +220,14 @@ export default function ChatInput({
                   </Popover>
                 ))}
 
-                {/* 2D素材编辑器按钮（仅在2D模式下显示，位于“场景”右侧） */}
-                {is2DMode && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-[40px] px-4 rounded-[10px] bg-[#424158] text-[#b7affe] border-0 hover:bg-[#4a4964]"
-                    onClick={() => onOpenTwoDEditor?.()}
-                  >
-                    2D素材生成
-                  </Button>
-                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-[40px] px-4 rounded-[10px] bg-[#424158] text-[#b7affe] border-0 hover:bg-[#4a4964]"
+                  onClick={() => onOpenTwoDEditor?.()}
+                >
+                  2D素材编辑器
+                </Button>
 
                 {/* 3D场景按钮 (仅在3D模式下显示) */}
                 {!is2DMode && (
@@ -338,17 +335,14 @@ export default function ChatInput({
           </Popover>
         ))}
 
-        {/* 2D素材编辑器按钮 (仅在2D模式下显示) */}
-        {is2DMode && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="hover:bg-white/10"
-            onClick={() => onOpenTwoDEditor?.()}
-          >
-            2D素材生成
-          </Button>
-        )}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="hover:bg-white/10"
+          onClick={() => onOpenTwoDEditor?.()}
+        >
+          2D素材编辑器
+        </Button>
 
         {/* 3D场景按钮 (仅在3D模式下显示) */}
         {!is2DMode && (

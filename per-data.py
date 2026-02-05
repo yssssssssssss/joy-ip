@@ -11,20 +11,38 @@ import math
 import os
 
 
-def analyze_red_region(image_path):
+def _is_debug_enabled() -> bool:
+    return str(os.environ.get("PER_DATA_DEBUG", "0")).strip().lower() in ("1", "true", "yes")
+
+
+def _debug_dir_for_output(output_path: str) -> str:
+    base_dir = os.path.dirname(str(output_path) or "") or "."
+    base_name = os.path.splitext(os.path.basename(str(output_path) or ""))[0] or "debug"
+    return os.path.join(base_dir, "debug", base_name)
+
+
+def analyze_red_region(image_input):
     """
     分析图片中的红色区域，返回位置和角度信息
     
     Args:
-        image_path: 图片路径
+        image_input: 图片路径或已加载的 numpy 数组(BGR/BGRA)
         
     Returns:
         dict: 包含红色区域信息的字典，如果未找到则返回None
     """
     # 读取图片
-    image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    image_path = None
+    if isinstance(image_input, str):
+        image_path = image_input
+        image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    else:
+        image = image_input
     if image is None:
-        print(f"错误：无法加载图片 {image_path}")
+        print(f"错误：无法加载图片 {image_path or '[array]'}")
+        return None
+    if not hasattr(image, "shape") or len(image.shape) < 3:
+        print("错误：图片格式不支持")
         return None
     
     # 转换为HSV颜色空间进行红色检测
@@ -257,6 +275,8 @@ def save_debug_image(image, output_dir, filename):
         output_dir: 输出目录
         filename: 文件名
     """
+    if not _is_debug_enabled():
+        return
     if image is not None:
         os.makedirs(output_dir, exist_ok=True)
         filepath = os.path.join(output_dir, filename)
@@ -279,7 +299,7 @@ def create_white_background_image(merged_image_path, output_dir):
         # 读取合图
         merged_img = cv2.imread(merged_image_path, cv2.IMREAD_UNCHANGED)
         if merged_img is None:
-            print(f"✗ 无法读取合图文件: {merged_image_path}")
+            print(f"[FAIL] 无法读取合图文件: {merged_image_path}")
             return None
         
         # 确保图片有alpha通道
@@ -356,9 +376,9 @@ def create_white_background_image(merged_image_path, output_dir):
                 merged_region[:, :, 3], bg_region[:, :, 3]
             )
             
-            print(f"✓ 成功将合图放置到1024x1200白色背景上")
+            print(f"[OK] 成功将合图放置到1024x1200白色背景上")
         else:
-            print("✗ 计算的放置区域无效")
+            print("[FAIL] 计算的放置区域无效")
             return None
         
         # 生成白色背景图的文件名
@@ -369,15 +389,15 @@ def create_white_background_image(merged_image_path, output_dir):
         # 保存白色背景图
         success = cv2.imwrite(white_bg_path, white_bg)
         if success:
-            print(f"✓ 白色背景图保存成功: {white_bg_path}")
-            print(f"✓ 尺寸: 1024x1200，白色背景，合图底边对齐")
+            print(f"[OK] 白色背景图保存成功: {white_bg_path}")
+            print(f"[OK] 尺寸: 1024x1200，白色背景，合图底边对齐")
             return white_bg_path
         else:
-            print("✗ 保存白色背景图失败")
+            print("[FAIL] 保存白色背景图失败")
             return None
             
     except Exception as e:
-        print(f"✗ 创建白色背景图时发生错误: {str(e)}")
+        print(f"[FAIL] 创建白色背景图时发生错误: {str(e)}")
         return None
 
 
@@ -408,8 +428,7 @@ def compose_images_new_logic(body_img_path, face_img_path, output_path, action_t
     if action_type:
         print(f"动作类型: {action_type}")
     
-    # 创建调试输出目录（仅用于保存最终图片）
-    debug_dir = os.path.join(os.path.dirname(output_path), "debug")
+    debug_dir = _debug_dir_for_output(output_path)
     
     # 步骤1: 识别body_img中红色区域相对于水平面的角度a
     print("\n--- 步骤1: 识别红色区域角度 ---")
@@ -462,10 +481,10 @@ def compose_images_new_logic(body_img_path, face_img_path, output_path, action_t
     print("\n--- 步骤4: 识别水平红色区域的中心点 ---")
     # 在旋转后的图片中重新分析红色区域，获取新的中心点
     if abs(angle_a) > 0.1:
-        temp_path = os.path.join(debug_dir, "temp_rotated_body.png")
-        os.makedirs(debug_dir, exist_ok=True)
-        cv2.imwrite(temp_path, body_img_rotated)
-        rotated_red_info = analyze_red_region(temp_path)
+        # 直接在内存中分析，避免并发下写临时文件导致 I/O 冲突
+        rotated_red_info = analyze_red_region(body_img_rotated)
+        # 如需调试再落盘（按输出文件名隔离目录）
+        save_debug_image(body_img_rotated, debug_dir, "temp_rotated_body.png")
         
         if rotated_red_info is None:
             print("错误：无法在旋转后的body图片中找到红色区域")
@@ -584,9 +603,9 @@ def compose_images_new_logic(body_img_path, face_img_path, output_path, action_t
     y_diff = abs(face_bottom_center_y - red_center_in_canvas_y)
     
     if x_diff <= 1 and y_diff <= 1:
-        print("✓ Face图片底边中心点与红色区域中心点重合（误差在1像素内）")
+        print("[OK] Face图片底边中心点与红色区域中心点重合（误差在1像素内）")
     else:
-        print(f"✗ Face图片底边中心点与红色区域中心点不重合，偏差: ({x_diff}, {y_diff})")
+        print(f"[FAIL] Face图片底边中心点与红色区域中心点不重合，偏差: ({x_diff}, {y_diff})")
     
     # 确保face图片位置在画布范围内
     if (face_abs_x >= 0 and face_abs_y >= 0 and 
@@ -602,11 +621,11 @@ def compose_images_new_logic(body_img_path, face_img_path, output_path, action_t
         face_mask_4 = face_mask[:, :, None]
         composed_top = np.where(face_mask_4, face_img_rotated, face_region)
         combined_img[face_abs_y:face_abs_y+face_h, face_abs_x:face_abs_x+face_w] = composed_top
-        print("✓ 已将头像图层置于最上层（仅覆盖非透明像素）")
+        print("[OK] 已将头像图层置于最上层（仅覆盖非透明像素）")
         
-        print(f"✓ 成功组合图片，画布尺寸: {canvas_w}x{canvas_h}")
+        print(f"[OK] 成功组合图片，画布尺寸: {canvas_w}x{canvas_h}")
     else:
-        print("✗ 错误：face图片位置仍然超出画布范围")
+        print("[FAIL] 错误：face图片位置仍然超出画布范围")
         print(f"Face位置: ({face_abs_x}, {face_abs_y}), 尺寸: {face_w}x{face_h}")
         print(f"画布尺寸: {canvas_w}x{canvas_h}")
         return False
@@ -617,14 +636,10 @@ def compose_images_new_logic(body_img_path, face_img_path, output_path, action_t
         # 正向旋转恢复原始角度
         final_img = rotate_image_around_center(combined_img, -angle_a)
         print(f"已将组合图片正向旋转 {-angle_a:.1f}°，恢复原始倾斜角度")
-        # 仅保存最终旋转后的图片
-        os.makedirs(debug_dir, exist_ok=True)
         save_debug_image(final_img, debug_dir, "final_rotated.png")
     else:
         final_img = combined_img.copy()
         print("角度太小，跳过最终旋转")
-        # 仅保存最终图片
-        os.makedirs(debug_dir, exist_ok=True)
         save_debug_image(final_img, debug_dir, "final_no_rotation.png")
 
     # 去除周围的空白区域
@@ -658,20 +673,20 @@ def compose_images_new_logic(body_img_path, face_img_path, output_path, action_t
 
     success = cv2.imwrite(output_path, final_canvas)
     if success:
-        print(f"✓ 最终合成图片已保存到: {output_path}")
-        print("✓ 尺寸: 2000x2000，透明背景")
+        print(f"[OK] 最终合成图片已保存到: {output_path}")
+        print("[OK] 尺寸: 2000x2000，透明背景")
         
         # 步骤9: 创建1024x1200白色背景图，将合图按底边对齐放置
         print("\n--- 步骤9: 创建1024x1200白色背景图并底边对齐 ---")
         white_bg_path = create_white_background_image(output_path, output_dir)
         if white_bg_path:
-            print(f"✓ 白色背景图已保存到: {white_bg_path}")
+            print(f"[OK] 白色背景图已保存到: {white_bg_path}")
             return white_bg_path  # 返回白色背景图的路径，供后续流程使用
         else:
-            print("✗ 创建白色背景图失败，返回原始合成图路径")
+            print("[FAIL] 创建白色背景图失败，返回原始合成图路径")
             return output_path
     else:
-        print("✗ 保存图片失败")
+        print("[FAIL] 保存图片失败")
         return False
 
 
@@ -695,4 +710,4 @@ if __name__ == "__main__":
     if success:
         print("\n🎉 图片合成完成！")
     else:
-        print("\n❌ 图片合成失败！")
+        print("\n[FAIL] 图片合成失败！")

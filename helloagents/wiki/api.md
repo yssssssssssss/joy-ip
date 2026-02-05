@@ -13,8 +13,11 @@
 #### [POST] /api/start_generate
 **描述:** 启动异步生成任务并返回 `job_id`；支持传入用户确认/编辑后的 `analysis`。
 
+**错误说明:**
+- 当队列已满时返回 `503`，并携带 `code=QUEUE_FULL`
+
 **补充（2D 底图）:**
-- 可选字段 `base_image_url`：来自 2D 素材编辑器的底图 URL（如 `/output/2d_editor/xxx_white_bg.png`）
+- 可选字段 `base_image_url`：来自 2D 素材编辑器的底图 URL（如 `/output/2d_editor/xxx_gray_bg.png`）
 - 当 `mode=2D` 且提供 `base_image_url` 时，后端 2D 链路会跳过“匹配头/身 + step1 拼装”，直接进入配件/背景/Gate 等后续步骤
 
 #### [GET] /api/job/<job_id>/status
@@ -23,12 +26,17 @@
 **响应补充字段:**
 - `job.latest_log`: 最新一条任务日志（来自 `JobManager.append_log`）
 - `job.logs_count`: 当前任务日志条数
+- `job.stage_timings`: 阶段耗时记录（如 `queued/match/compose/...`），用于性能分析与定位慢点
 
 #### [POST] /api/job/<job_id>/cancel
 **描述:** 取消排队中的任务。
 
 #### [GET] /api/queue/stats
 **描述:** 获取队列统计信息（运行数、等待数、并发数、平均耗时）。
+
+**补充字段:**
+- `avg_duration/p50_duration/p95_duration`：近一段时间任务执行耗时的均值/分位数（秒）
+- `queue_max_size`：队列最大长度（超过会拒绝新任务并返回 503）
 
 ### 3D 编辑器链路
 
@@ -60,7 +68,7 @@
 #### [POST] /api/2d_editor/compose
 **描述:** 2D 编辑器拼装接口：给定 head/body 素材 URL 与动作类型，调用 `per-data-2D.py` 拼装并返回：
 - `preview_url`：透底 `2000x2000` 预览图（用于编辑器“拼装结果”区域展示）
-- `base_image_url`：白底 `1024x1200` 底图（用于后续 2D 生成链路输入）
+- `base_image_url`：灰底 `1024x1200` 底图（用于后续 2D 生成链路输入）
 
 **请求:**
 ```json
@@ -76,8 +84,8 @@
 {
   "success": true,
   "preview_url": "/output/2d_editor/2d_editor_xxx.png",
-  "base_image_url": "/output/2d_editor/2d_editor_xxx_white_bg.png",
-  "url": "/output/2d_editor/2d_editor_xxx_white_bg.png"
+  "base_image_url": "/output/2d_editor/2d_editor_xxx_gray_bg.png",
+  "url": "/output/2d_editor/2d_editor_xxx_gray_bg.png"
 }
 ```
 

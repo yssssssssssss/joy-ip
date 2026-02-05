@@ -2,9 +2,21 @@ import os
 import sys
 import json
 import base64
+import time
 import mimetypes
 import re
 import requests
+from contextlib import contextmanager
+
+try:
+    # 复用全局 Session 与限流器，避免高并发下连接风暴与超时雪崩
+    from utils.http_client import http_post
+    from utils.limits import limit_gate
+    _USE_SHARED_HTTP = True
+except Exception:
+    http_post = None
+    limit_gate = None
+    _USE_SHARED_HTTP = False
 
 """
 合并脚本说明：
@@ -215,6 +227,22 @@ def parse_all_texts(obj: dict) -> list[str]:
 
 def run_gemini_flash_generation(image_path: str, prompt_text: str) -> str:
     """调用 /v1/images/gemini_flash/generations 接口，返回合并的文本。"""
+    offline = str(os.environ.get("OFFLINE_MODE", "0")).strip().lower() in ("1", "true", "yes")
+    if offline:
+        try:
+            ms = int(str(os.environ.get("OFFLINE_GATE_LATENCY_MS", "")).strip() or "0")
+        except Exception:
+            ms = 0
+        if ms > 0:
+            time.sleep(ms / 1000.0)
+        # 返回一段可被现有正则解析的文本（包含“总体评分”），用于本地压测与链路验证
+        return (
+            "总体评分**：正常\n"
+            "肢体检测**：0 - 无\n"
+            "五官分析**：正常\n"
+            "互动逻辑**：正常\n"
+            "其他异常**：无"
+        )
     url = "https://modelservice.jdcloud.com/v1/images/gemini_flash/generations"
     bearer_token = os.environ.get("AI_API_KEY", "")
     headers = {
@@ -238,8 +266,24 @@ def run_gemini_flash_generation(image_path: str, prompt_text: str) -> str:
     base64_data, mime_type = encode_image_to_base64_with_mime(abs_path)
     payload = build_payload_gemini_flash(prompt_text, mime_type, base64_data)
 
+    timeout_s = int(os.environ.get("GATE_IMAGE_TIMEOUT_S", "45"))
+    connect_timeout = int(os.environ.get("HTTP_CONNECT_TIMEOUT_S", "10"))
+    timeout = (connect_timeout, timeout_s)
+
+    @contextmanager
+    def _maybe_limit():
+        if _USE_SHARED_HTTP and limit_gate is not None:
+            with limit_gate():
+                yield
+        else:
+            yield
+
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=90)  # 90秒超时
+        with _maybe_limit():
+            if _USE_SHARED_HTTP and http_post is not None:
+                response = http_post(url, json=payload, headers=headers, timeout=timeout)
+            else:
+                response = requests.post(url, headers=headers, json=payload, timeout=timeout)
         try:
             resp_json = response.json()
             texts = parse_all_texts(resp_json)
@@ -471,6 +515,16 @@ def judge_abnormalities_by_llm(analysis_results, judge_model_name="Gemini-2.5-pr
     返回示例：
     {"status":"abnormal|normal","reason":"...","abnormal_models":["模型A","模型B"]}
     """
+    offline = str(os.environ.get("OFFLINE_MODE", "0")).strip().lower() in ("1", "true", "yes")
+    if offline:
+        try:
+            ms = int(str(os.environ.get("OFFLINE_GATE_JUDGE_LATENCY_MS", "")).strip() or "0")
+        except Exception:
+            ms = 0
+        if ms > 0:
+            time.sleep(ms / 1000.0)
+        return {"status": "normal", "reason": "OFFLINE_MODE=1: 跳过聚合裁决", "abnormal_models": []}
+
     api_url = "https://modelservice.jdcloud.com/v1/chat/completions"
     bearer_token = os.environ.get("AI_API_KEY", "")
     headers = {
@@ -524,8 +578,24 @@ def judge_abnormalities_by_llm(analysis_results, judge_model_name="Gemini-2.5-pr
         "model": judge_model_name,
     }
 
+    timeout_s = int(os.environ.get("GATE_JUDGE_TIMEOUT_S", "30"))
+    connect_timeout = int(os.environ.get("HTTP_CONNECT_TIMEOUT_S", "10"))
+    timeout = (connect_timeout, timeout_s)
+
+    @contextmanager
+    def _maybe_limit():
+        if _USE_SHARED_HTTP and limit_gate is not None:
+            with limit_gate():
+                yield
+        else:
+            yield
+
     try:
-        response = requests.post(api_url, headers=headers, json=data, timeout=90)  # 90秒超时
+        with _maybe_limit():
+            if _USE_SHARED_HTTP and http_post is not None:
+                response = http_post(api_url, json=data, headers=headers, timeout=timeout)
+            else:
+                response = requests.post(api_url, headers=headers, json=data, timeout=timeout)
         response.raise_for_status()
         resp_json = response.json()
         content_text = extract_text_from_response(resp_json, model_name=judge_model_name)
@@ -559,7 +629,8 @@ def judge_abnormalities_by_llm(analysis_results, judge_model_name="Gemini-2.5-pr
 
 
 def check_for_abnormalities(analysis_results):
-    judge = judge_abnormalities_by_llm(analysis_results, judge_model_name="gpt-5")
+    judge_model = os.environ.get("GATE_JUDGE_MODEL", "gpt-5")
+    judge = judge_abnormalities_by_llm(analysis_results, judge_model_name=judge_model)
     is_abnormal = judge.get("status") == "abnormal"
     abnormal_models = judge.get("abnormal_models", [])
     return is_abnormal, abnormal_models, judge
@@ -603,6 +674,19 @@ def analyze_image_with_three_models(image_path: str):
     _log(f"开始检查图片: {image_path}")
     analysis_results: dict[str, str] = {}
 
+    gate_mode = str(os.environ.get("GATE_MODE", "auto")).strip().lower()
+
+    def _extract_overall_rating(text: str) -> str:
+        if not isinstance(text, str):
+            return ""
+        m = re.search(r"总体评分\\*\\*?\\s*[：:（）\\(\\)\\s]*\\s*(正常|轻微瑕疵|严重崩坏)", text)
+        if m:
+            return str(m.group(1)).strip()
+        m = re.search(r"总体评分[：:（\\(]\\s*(正常|轻微瑕疵|严重崩坏)", text)
+        if m:
+            return str(m.group(1)).strip()
+        return ""
+
     # 1) Gemini Flash generations（保持原始调用方式与 Prompt）
     _log("1/2 调用 Gemini 3-Pro-Image-Preview...")
     res_flash = run_gemini_flash_generation(image_path, PROMPT_FLASH)
@@ -621,7 +705,26 @@ def analyze_image_with_three_models(image_path: str):
     # _log(f"3/3 完成 - 结果长度: {len(res_claude) if res_claude else 0} 字符")
     # analysis_results["Claude-opus-4"] = res_claude
 
-    # 聚合裁决（保持原始 judge 方式）
+    # Gate 模式：fast/strict/auto
+    rating = _extract_overall_rating(res_flash or "")
+    if rating:
+        _log(f"快速判定 - 总体评分: {rating}")
+
+    # fast：仅用单模型文本快速判定（减少外部调用，降低超时）
+    if gate_mode == "fast":
+        is_abnormal = rating == "严重崩坏"
+        if is_abnormal:
+            _log("结果: ❌ 不合格 - fast模式判定为严重崩坏")
+        else:
+            _log("结果: ✅ 合格 - fast模式")
+        return (not is_abnormal), analysis_results
+
+    # auto：仅在“严重崩坏”或无法解析时才触发二次裁决（默认推荐）
+    if gate_mode == "auto" and rating and rating != "严重崩坏":
+        _log("结果: ✅ 合格 - auto模式(未触发二次裁决)")
+        return True, analysis_results
+
+    # strict / auto 触发：聚合裁决（外部二次调用）
     _log("聚合裁决中...")
     is_abnormal, abnormal_models, judge = check_for_abnormalities(analysis_results)
 
@@ -629,13 +732,13 @@ def analyze_image_with_three_models(image_path: str):
         _log(f"结果: ❌ 不合格 - 异常模型: {', '.join(abnormal_models)}")
     else:
         _log("结果: ✅ 合格")
-    
+
     if isinstance(judge, dict):
         reason = judge.get("reason")
         if isinstance(reason, str) and reason.strip():
             _log(f"裁决原因: {reason.strip()}")
 
-    return not is_abnormal, analysis_results
+    return (not is_abnormal), analysis_results
 
 
 # ---------------------- 主入口 ----------------------

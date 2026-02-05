@@ -11,6 +11,7 @@ import glob
 import time
 import uuid
 from typing import List, Tuple, Dict, Optional, Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image, ImageDraw
 from matchers.body_matcher import BodyMatcher
 from matchers.head_matcher import HeadMatcher
@@ -172,7 +173,7 @@ class ImageProcessor:
     
     def combine_images(self, body_images: List[str], head_images: List[Dict], 
                       action_type: str, output_dir: str = "output", log_callback: Optional[Callable[[str], None]] = None) -> List[str]:
-        """组合身体和头像图片"""
+        """组合身体和头像图片（支持并行）"""
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
@@ -181,24 +182,35 @@ class ImageProcessor:
         from datetime import datetime
         unique_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + '_' + uuid.uuid4().hex[:4]
         
-        # 所有动作类型都进行body和face图片的两两组合
+        # 并行 workers：默认 4，可用环境变量覆盖（与 generation_controller 保持同一开关）
+        max_workers_env = int(os.environ.get("MAX_PARALLEL_WORKERS", "4"))
+        max_workers = max(1, max_workers_env)
+
+        tasks: List[Tuple[int, str, str]] = []
+        idx = 0
         for i, body_path in enumerate(body_images):
             for j, head_data in enumerate(head_images):
-                if action_type == "跳跃":
-                    combined_path = self._combine_jump_images(
-                        body_path, head_data["image_path"], 
-                        output_dir, f"{unique_tag}_{i}_{j}"
-                    )
-                elif action_type == "跑动":
-                    combined_path = self._combine_running_images(
-                        body_path, head_data["image_path"], 
-                        output_dir, f"{unique_tag}_{i}_{j}"
-                    )
-                else:
-                    combined_path = self._combine_normal_images(
-                        body_path, head_data["image_path"], 
-                        output_dir, f"{unique_tag}_{i}_{j}"
-                    )
+                head_path = head_data.get("image_path")
+                if not body_path or not head_path:
+                    continue
+                tasks.append((idx, body_path, head_path))
+                idx += 1
+
+        if not tasks:
+            return []
+
+        def _run_one(task_idx: int, body_path: str, head_path: str) -> Optional[str]:
+            suffix = f"{unique_tag}_{task_idx}"
+            if action_type == "跳跃":
+                return self._combine_jump_images(body_path, head_path, output_dir, suffix)
+            if action_type == "跑动":
+                return self._combine_running_images(body_path, head_path, output_dir, suffix)
+            return self._combine_normal_images(body_path, head_path, output_dir, suffix)
+
+        workers = min(max_workers, len(tasks))
+        if workers <= 1:
+            for task_idx, body_path, head_path in tasks:
+                combined_path = _run_one(task_idx, body_path, head_path)
                 if combined_path:
                     combined_images.append(combined_path)
                     if log_callback:
@@ -206,6 +218,30 @@ class ImageProcessor:
                             log_callback(f"生成组合图片: {combined_path}")
                         except Exception:
                             pass
+            return combined_images
+
+        results: Dict[int, Optional[str]] = {}
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_idx = {
+                executor.submit(_run_one, task_idx, body_path, head_path): task_idx
+                for task_idx, body_path, head_path in tasks
+            }
+            for future in as_completed(future_to_idx):
+                task_idx = future_to_idx[future]
+                try:
+                    results[task_idx] = future.result()
+                except Exception:
+                    results[task_idx] = None
+
+        for task_idx in sorted(results.keys()):
+            combined_path = results.get(task_idx)
+            if combined_path:
+                combined_images.append(combined_path)
+                if log_callback:
+                    try:
+                        log_callback(f"生成组合图片: {combined_path}")
+                    except Exception:
+                        pass
         
         return combined_images
 
@@ -244,7 +280,26 @@ class ImageProcessor:
                 "error": "没有找到合适的头像图片",
                 "action_type": action_type
             }
-        combined_images = self.combine_images(body_images, head_images, action_type, output_dir, log_callback=log_callback)
+        # 拼图阶段：若 0 张产出，尝试重选 body 再重试（默认 1 次）
+        max_compose_retries = int(os.environ.get("COMPOSE_MAX_RETRIES", "1"))
+        combined_images: List[str] = []
+        for attempt in range(max_compose_retries + 1):
+            combined_images = self.combine_images(body_images, head_images, action_type, output_dir, log_callback=log_callback)
+            if combined_images:
+                break
+            if attempt < max_compose_retries:
+                body_images = self.select_body_images(action_type)
+
+        if not combined_images:
+            return {
+                "success": False,
+                "error": "基础拼装失败（0 张产出）",
+                "action_type": action_type,
+                "body_images": body_images,
+                "head_images": [img.get("image_path") for img in head_images],
+                "combined_images": [],
+                "total_generated": 0,
+            }
         if log_callback:
             try:
                 log_callback(f"组合生成基础图片 {len(combined_images)} 张")

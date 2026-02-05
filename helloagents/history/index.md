@@ -12,6 +12,7 @@
 | 202601221447 | 2d_asset_editor | 功能 | ✅已完成 | [2026-01/202601221447_2d_asset_editor](2026-01/202601221447_2d_asset_editor/) |
 | 202601221604 | joy3d-modal-fix | 修复 | ✅已完成 | [2026-01/202601221604_joy3d-modal-fix](2026-01/202601221604_joy3d-modal-fix/) |
 | 202601221722 | joy3d-canvas-layout | 修复 | ✅已完成 | [2026-01/202601221722_joy3d-canvas-layout](2026-01/202601221722_joy3d-canvas-layout/) |
+| 202602041026 | head_clip_query_enrich | 变更 | ✅已完成 | [2026-02/202602041026_head_clip_query_enrich](2026-02/202602041026_head_clip_query_enrich/) |
 
 ## 按月归档
 
@@ -23,3 +24,7 @@
 - [202601221447_2d_asset_editor](2026-01/202601221447_2d_asset_editor/) - 2D 素材编辑器：选择表情/动作素材拼装底图，并作为后续生成链路输入
 - [202601221604_joy3d-modal-fix](2026-01/202601221604_joy3d-modal-fix/) - 修复 3D 编辑器弹窗比例与关闭后聊天记录本地持久化
 - [202601221722_joy3d-canvas-layout](2026-01/202601221722_joy3d-canvas-layout/) - 修复 3D 编辑器画布按 `1024x1200` 比例居中适配，toolbar/预审区响应式收缩并减少占用画布高度
+
+### 2026-02
+
+- [202602041026_head_clip_query_enrich](2026-02/202602041026_head_clip_query_enrich/) - head 素材检索 query 英文翻译+补全（CLIP）

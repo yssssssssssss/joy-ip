@@ -345,9 +345,135 @@ def save_debug_image(image, output_dir, filename):
         print(f"已保存调试图片: {filepath}")
 
 
+def create_solid_background_image(merged_image_path, output_dir, bg_bgr=(220, 220, 220), filename_suffix="_gray_bg", label="灰色"):
+    """
+    创建1024x1200纯色背景图，将合图按底边对齐放置
+
+    Args:
+        merged_image_path: 合图文件路径
+        output_dir: 输出目录
+        bg_bgr: 背景色（BGR）
+        filename_suffix: 输出文件名后缀（不含扩展名）
+        label: 日志中的背景色名称（如“灰色/白色”）
+
+    Returns:
+        str: 背景图的文件路径，失败返回None
+    """
+    try:
+        # 读取合图
+        merged_img = cv2.imread(merged_image_path, cv2.IMREAD_UNCHANGED)
+        if merged_img is None:
+            print(f"✗ 无法读取合图文件: {merged_image_path}")
+            return None
+
+        # 确保图片有alpha通道
+        merged_img = ensure_alpha_channel(merged_img)
+        merged_h, merged_w = merged_img.shape[:2]
+
+        print(f"合图尺寸: {merged_w}x{merged_h}")
+
+        # 创建1024x1200的纯色背景图 (BGRA格式)
+        bg = np.zeros((1200, 1024, 4), dtype=np.uint8)
+        bg[:, :, 0] = int(bg_bgr[0])
+        bg[:, :, 1] = int(bg_bgr[1])
+        bg[:, :, 2] = int(bg_bgr[2])
+        bg[:, :, 3] = 255  # alpha 不透明
+
+        # 计算合图在背景上的位置（水平居中，底边对齐）
+        bg_h, bg_w = bg.shape[:2]
+
+        # 水平居中
+        start_x = max(0, (bg_w - merged_w) // 2)
+        end_x = min(bg_w, start_x + merged_w)
+
+        # 底边对齐（合图的底部与背景的底部对齐）
+        start_y = max(0, bg_h - merged_h)
+        end_y = bg_h
+
+        # 计算实际可放置的区域
+        actual_w = end_x - start_x
+        actual_h = end_y - start_y
+
+        print(f"合图在{label}背景上的位置: x({start_x}-{end_x}), y({start_y}-{end_y})")
+        print(f"实际放置尺寸: {actual_w}x{actual_h}")
+
+        # 如果合图尺寸超出背景，需要缩放
+        if merged_w > bg_w or merged_h > bg_h:
+            # 计算缩放比例，保持宽高比
+            scale_w = bg_w / merged_w if merged_w > bg_w else 1.0
+            scale_h = bg_h / merged_h if merged_h > bg_h else 1.0
+            scale = min(scale_w, scale_h)
+
+            new_w = int(merged_w * scale)
+            new_h = int(merged_h * scale)
+
+            print(f"合图过大，缩放比例: {scale:.2f}, 新尺寸: {new_w}x{new_h}")
+
+            # 缩放合图
+            merged_img = cv2.resize(merged_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            merged_h, merged_w = merged_img.shape[:2]
+
+            # 重新计算位置
+            start_x = max(0, (bg_w - merged_w) // 2)
+            end_x = min(bg_w, start_x + merged_w)
+            start_y = max(0, bg_h - merged_h)
+            end_y = bg_h
+            actual_w = end_x - start_x
+            actual_h = end_y - start_y
+
+        # 将合图放置到背景上（使用alpha混合）
+        if actual_w > 0 and actual_h > 0:
+            merged_region = merged_img[:actual_h, :actual_w]
+            bg_region = bg[start_y:end_y, start_x:end_x]
+
+            alpha = merged_region[:, :, 3:4].astype(np.float32) / 255.0
+            blended_rgb = (
+                merged_region[:, :, :3].astype(np.float32) * alpha
+                + bg_region[:, :, :3].astype(np.float32) * (1 - alpha)
+            ).astype(np.uint8)
+
+            bg[start_y:end_y, start_x:end_x, :3] = blended_rgb
+            bg[start_y:end_y, start_x:end_x, 3] = np.maximum(merged_region[:, :, 3], bg_region[:, :, 3])
+            print(f"✓ 成功将合图放置到1024x1200{label}背景上")
+        else:
+            print("✗ 计算的放置区域无效")
+            return None
+
+        base_name = os.path.splitext(os.path.basename(merged_image_path))[0]
+        filename = f"{base_name}{filename_suffix}.png"
+        out_path = os.path.join(output_dir, filename)
+
+        success = cv2.imwrite(out_path, bg)
+        if success:
+            print(f"✓ {label}背景图保存成功: {out_path}")
+            print(f"✓ 尺寸: 1024x1200，{label}背景，合图底边对齐")
+            return out_path
+
+        print(f"✗ 保存{label}背景图失败")
+        return None
+
+    except Exception as e:
+        print(f"✗ 创建{label}背景图时发生错误: {str(e)}")
+        return None
+
+
+def create_gray_background_image(merged_image_path, output_dir):
+    """
+    创建1024x1200浅灰色背景图，将合图按底边对齐放置
+    """
+    # 约定：浅灰色背景（BGR），与 2D prompt 中“浅灰色背景”对齐
+    return create_solid_background_image(
+        merged_image_path,
+        output_dir,
+        bg_bgr=(220, 220, 220),
+        filename_suffix="_gray_bg",
+        label="灰色",
+    )
+
+
 def create_white_background_image(merged_image_path, output_dir):
     """
-    创建1024x1200白色背景图，将合图按底边对齐放置
+    兼容保留：创建1024x1200白色背景图，将合图按底边对齐放置
     
     Args:
         merged_image_path: 合图文件路径
@@ -356,110 +482,13 @@ def create_white_background_image(merged_image_path, output_dir):
     Returns:
         str: 白色背景图的文件路径，失败返回None
     """
-    try:
-        # 读取合图
-        merged_img = cv2.imread(merged_image_path, cv2.IMREAD_UNCHANGED)
-        if merged_img is None:
-            print(f"✗ 无法读取合图文件: {merged_image_path}")
-            return None
-        
-        # 确保图片有alpha通道
-        merged_img = ensure_alpha_channel(merged_img)
-        merged_h, merged_w = merged_img.shape[:2]
-        
-        print(f"合图尺寸: {merged_w}x{merged_h}")
-        
-        # 创建1024x1200的白色背景图 (RGBA格式)
-        white_bg = np.ones((1200, 1024, 4), dtype=np.uint8) * 255
-        white_bg[:, :, 3] = 255  # 设置alpha通道为不透明
-        
-        # 计算合图在白色背景上的位置（水平居中，底边对齐）
-        bg_h, bg_w = white_bg.shape[:2]
-        
-        # 水平居中
-        start_x = max(0, (bg_w - merged_w) // 2)
-        end_x = min(bg_w, start_x + merged_w)
-        
-        # 底边对齐（合图的底部与白色背景的底部对齐）
-        start_y = max(0, bg_h - merged_h)
-        end_y = bg_h
-        
-        # 计算实际可放置的区域
-        actual_w = end_x - start_x
-        actual_h = end_y - start_y
-        
-        print(f"合图在白色背景上的位置: x({start_x}-{end_x}), y({start_y}-{end_y})")
-        print(f"实际放置尺寸: {actual_w}x{actual_h}")
-        
-        # 如果合图尺寸超出白色背景，需要缩放
-        if merged_w > bg_w or merged_h > bg_h:
-            # 计算缩放比例，保持宽高比
-            scale_w = bg_w / merged_w if merged_w > bg_w else 1.0
-            scale_h = bg_h / merged_h if merged_h > bg_h else 1.0
-            scale = min(scale_w, scale_h)
-            
-            new_w = int(merged_w * scale)
-            new_h = int(merged_h * scale)
-            
-            print(f"合图过大，缩放比例: {scale:.2f}, 新尺寸: {new_w}x{new_h}")
-            
-            # 缩放合图
-            merged_img = cv2.resize(merged_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            merged_h, merged_w = merged_img.shape[:2]
-            
-            # 重新计算位置
-            start_x = max(0, (bg_w - merged_w) // 2)
-            end_x = min(bg_w, start_x + merged_w)
-            start_y = max(0, bg_h - merged_h)
-            end_y = bg_h
-            actual_w = end_x - start_x
-            actual_h = end_y - start_y
-        
-        # 将合图放置到白色背景上（使用alpha混合）
-        if actual_w > 0 and actual_h > 0:
-            # 获取要放置的区域
-            merged_region = merged_img[:actual_h, :actual_w]
-            bg_region = white_bg[start_y:end_y, start_x:end_x]
-            
-            # 使用alpha通道进行混合
-            alpha = merged_region[:, :, 3:4].astype(np.float32) / 255.0
-            
-            # 计算混合结果
-            blended_rgb = (
-                merged_region[:, :, :3].astype(np.float32) * alpha + 
-                bg_region[:, :, :3].astype(np.float32) * (1 - alpha)
-            ).astype(np.uint8)
-            
-            # 更新白色背景
-            white_bg[start_y:end_y, start_x:end_x, :3] = blended_rgb
-            # alpha通道保持白色背景的不透明度
-            white_bg[start_y:end_y, start_x:end_x, 3] = np.maximum(
-                merged_region[:, :, 3], bg_region[:, :, 3]
-            )
-            
-            print(f"✓ 成功将合图放置到1024x1200白色背景上")
-        else:
-            print("✗ 计算的放置区域无效")
-            return None
-        
-        # 生成白色背景图的文件名
-        base_name = os.path.splitext(os.path.basename(merged_image_path))[0]
-        white_bg_filename = f"{base_name}_white_bg.png"
-        white_bg_path = os.path.join(output_dir, white_bg_filename)
-        
-        # 保存白色背景图
-        success = cv2.imwrite(white_bg_path, white_bg)
-        if success:
-            print(f"✓ 白色背景图保存成功: {white_bg_path}")
-            print(f"✓ 尺寸: 1024x1200，白色背景，合图底边对齐")
-            return white_bg_path
-        else:
-            print("✗ 保存白色背景图失败")
-            return None
-            
-    except Exception as e:
-        print(f"✗ 创建白色背景图时发生错误: {str(e)}")
-        return None
+    return create_solid_background_image(
+        merged_image_path,
+        output_dir,
+        bg_bgr=(255, 255, 255),
+        filename_suffix="_white_bg",
+        label="白色",
+    )
 
 
 def compose_images_new_logic(body_img_path, face_img_path, output_path, action_type=None):
@@ -740,14 +769,14 @@ def compose_images_new_logic(body_img_path, face_img_path, output_path, action_t
         print(f"✓ 最终合成图片已保存到: {output_path}")
         print("✓ 尺寸: 2000x2000，透明背景")
         
-        # 步骤9: 创建1024x1200白色背景图，将合图按底边对齐放置
-        print("\n--- 步骤9: 创建1024x1200白色背景图并底边对齐 ---")
-        white_bg_path = create_white_background_image(output_path, output_dir)
-        if white_bg_path:
-            print(f"✓ 白色背景图已保存到: {white_bg_path}")
-            return white_bg_path  # 返回白色背景图的路径，供后续流程使用
+        # 步骤9: 创建1024x1200灰色背景图，将合图按底边对齐放置
+        print("\n--- 步骤9: 创建1024x1200灰色背景图并底边对齐 ---")
+        gray_bg_path = create_gray_background_image(output_path, output_dir)
+        if gray_bg_path:
+            print(f"✓ 灰色背景图已保存到: {gray_bg_path}")
+            return gray_bg_path  # 返回灰色背景图的路径，供后续流程使用
         else:
-            print("✗ 创建白色背景图失败，返回原始合成图路径")
+            print("✗ 创建灰色背景图失败，返回原始合成图路径")
             return output_path
     else:
         print("✗ 保存图片失败")

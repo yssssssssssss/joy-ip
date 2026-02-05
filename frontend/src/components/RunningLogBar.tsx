@@ -7,8 +7,10 @@ interface RunningLogBarProps {
 
 export default function RunningLogBar({ visible, text }: RunningLogBarProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const measureRef = useRef<HTMLSpanElement>(null)
   const textRef = useRef<HTMLSpanElement>(null)
   const [marqueeKey, setMarqueeKey] = useState(0)
+  const [stepIndex, setStepIndex] = useState(0)
   const [marquee, setMarquee] = useState<{ enabled: boolean; distancePx: number; durationSec: number }>({
     enabled: false,
     distancePx: 0,
@@ -16,19 +18,46 @@ export default function RunningLogBar({ visible, text }: RunningLogBarProps) {
   })
 
   const displayText = text || ''
+  const steps = (() => {
+    const byLines = displayText
+      .split(/\r?\n+/)
+      .map(s => s.trim())
+      .filter(Boolean)
+    if (byLines.length > 1) return byLines
+
+    const t = byLines[0] || ''
+    const re = /步骤\s*\d+\s*[：:]/g
+    const matches: Array<{ index: number }> = []
+    let m: RegExpExecArray | null = null
+    while ((m = re.exec(t)) !== null) {
+      matches.push({ index: m.index })
+    }
+    if (matches.length <= 1) return byLines
+
+    const parts: string[] = []
+    for (let i = 0; i < matches.length; i += 1) {
+      const start = matches[i].index
+      const end = i + 1 < matches.length ? matches[i + 1].index : t.length
+      const s = t.slice(start, end).trim()
+      if (s) parts.push(s)
+    }
+    return parts.length > 1 ? parts : byLines
+  })()
+  const isStepsMode = steps.length > 1
+  const activeText = isStepsMode ? (steps[stepIndex] ?? steps[0] ?? '') : displayText
 
   const recalcMarquee = useCallback(() => {
     const container = containerRef.current
-    const content = textRef.current
-    if (!container || !content) return
+    const measure = measureRef.current
+    if (!container || !measure) return
 
-    if (!visible || !displayText) {
+    if (!visible || !activeText || isStepsMode) {
       setMarquee(prev => (prev.enabled ? { enabled: false, distancePx: 0, durationSec: 0 } : prev))
       return
     }
 
     const containerWidth = container.getBoundingClientRect().width
-    const contentWidth = content.scrollWidth
+    const contentWidth = measure.scrollWidth
     const overflowPx = Math.ceil(contentWidth - containerWidth)
 
     if (overflowPx <= 1) {
@@ -43,7 +72,7 @@ export default function RunningLogBar({ visible, text }: RunningLogBarProps) {
       if (prev.enabled && prev.distancePx === distancePx && prev.durationSec === durationSec) return prev
       return { enabled: true, distancePx, durationSec }
     })
-  }, [visible, displayText])
+  }, [visible, activeText, isStepsMode])
 
   useLayoutEffect(() => {
     recalcMarquee()
@@ -52,19 +81,33 @@ export default function RunningLogBar({ visible, text }: RunningLogBarProps) {
   useEffect(() => {
     if (!visible) return
     setMarqueeKey(key => key + 1)
-  }, [visible, displayText])
+  }, [visible, activeText])
+
+  useEffect(() => {
+    if (!visible || !isStepsMode) return
+    setStepIndex(0)
+  }, [visible, isStepsMode, displayText])
+
+  useEffect(() => {
+    if (!visible || !isStepsMode) return
+    if (steps.length <= 1) return
+    const timer = window.setInterval(() => {
+      setStepIndex(prev => (prev + 1) % steps.length)
+    }, 1600)
+    return () => window.clearInterval(timer)
+  }, [visible, isStepsMode, steps.length])
 
   useEffect(() => {
     if (!visible) return
     if (typeof ResizeObserver === 'undefined') return
 
     const container = containerRef.current
-    const content = textRef.current
-    if (!container || !content) return
+    const measure = measureRef.current
+    if (!container || !measure) return
 
     const observer = new ResizeObserver(() => recalcMarquee())
     observer.observe(container)
-    observer.observe(content)
+    observer.observe(measure)
     return () => observer.disconnect()
   }, [visible, recalcMarquee])
 
@@ -76,12 +119,31 @@ export default function RunningLogBar({ visible, text }: RunningLogBarProps) {
       aria-hidden={!visible}
     >
       <div className={`transform transition-transform duration-300 ${visible ? 'translate-y-0' : '-translate-y-2'}`}>
-        <div className="h-8 flex items-center gap-2 px-4 rounded-[12px] bg-[#2b2d33] border border-white/10 shadow-[0_8px_24px_rgba(0,0,0,0.25)]">
+        <div className="h-8 w-full flex items-center gap-2 px-4 rounded-[12px] bg-[#2b2d33] border border-white/10 shadow-[0_8px_24px_rgba(0,0,0,0.25)]">
           <div className="relative flex items-center justify-center w-2.5 h-2.5 flex-shrink-0">
             <span className="absolute inline-flex h-2.5 w-2.5 rounded-full bg-purple-400/30 animate-ping" />
             <span className="relative inline-flex rounded-full h-2 w-2 bg-gradient-to-r from-[#d580ff] to-[#a6ccfd]" />
           </div>
-          <div ref={containerRef} className="relative flex-1 min-w-0 overflow-hidden">
+          <div ref={containerRef} className="relative flex-1 min-w-0 overflow-hidden h-8">
+            <span
+              ref={measureRef}
+              className="absolute left-0 top-0 whitespace-nowrap opacity-0 pointer-events-none select-none"
+            >
+              {activeText}
+            </span>
+            {isStepsMode ? (
+              <div
+                className="transition-transform duration-300 will-change-transform"
+                style={{ transform: `translateY(-${stepIndex * 32}px)` }}
+                aria-live="polite"
+              >
+                {steps.map((s, i) => (
+                  <div key={`${i}-${s}`} className="h-8 flex items-center">
+                    <span className="block text-xs text-white/70 truncate w-full">{s}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
             <span
               key={marqueeKey}
               ref={textRef}
@@ -96,8 +158,9 @@ export default function RunningLogBar({ visible, text }: RunningLogBarProps) {
               }
               aria-live="polite"
             >
-              {displayText}
+              {activeText}
             </span>
+            )}
           </div>
         </div>
       </div>

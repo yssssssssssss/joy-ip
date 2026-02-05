@@ -298,6 +298,31 @@ def _append_log(job_id: str, text: str):
 
 def _run_generation_job(job_id: str, requirement: str):
     """在后台线程中执行完整生成流程，并持续更新任务状态"""
+    job_wall_start = time.time()
+    time_budget_s = int(os.environ.get("JOB_TIME_BUDGET_S", "600"))
+    job_deadline = time.monotonic() + max(30, time_budget_s)
+
+    def _ensure_budget(stage: str) -> bool:
+        if time.monotonic() <= job_deadline:
+            return True
+        duration_s = time.time() - job_wall_start
+        error_msg = f"任务超时：超过时间预算（{time_budget_s}s）"
+        _update_job(
+            job_id,
+            status='failed',
+            stage=stage,
+            progress=100,
+            error=error_msg,
+            details={
+                'type': 'timeout',
+                'code': 'TIME_BUDGET',
+                'time_budget_s': time_budget_s,
+                'processing_time': round(duration_s, 2),
+            }
+        )
+        _append_log(job_id, error_msg)
+        return False
+
     try:
         _update_job(job_id, status='running', stage='analyze', progress=5)
         _append_log(job_id, f"收到生成请求: {requirement}")
@@ -317,6 +342,9 @@ def _run_generation_job(job_id: str, requirement: str):
             logger.info(f"[Job {job_id}] 开始2D生成流程")
             if base_image_path:
                 _append_log(job_id, "检测到2D底图，将跳过头/身匹配与拼装步骤")
+
+            if not _ensure_budget('analyze'):
+                return
             
             # 创建2D生成控制器
             controller_2d = GenerationController2D()
@@ -327,7 +355,8 @@ def _run_generation_job(job_id: str, requirement: str):
                 perspective,
                 output_dir="output",
                 pre_analysis=pre_analysis,
-                base_image_path=base_image_path
+                base_image_path=base_image_path,
+                log_callback=lambda t: _append_log(job_id, t)
             )
             
             if result.get('success') and result.get('images'):
@@ -340,18 +369,45 @@ def _run_generation_job(job_id: str, requirement: str):
                         relative_path = os.path.relpath(img_path, '.')
                         img_url = f"/{relative_path.replace(os.sep, '/')}"
                     image_urls.append(img_url)
-                
+
+                duration_s = time.time() - job_wall_start
                 _update_job(job_id, images=image_urls, progress=100, stage='done', status='succeeded', 
                            analysis=result.get('analysis'), details={
                     'generated_count': len(result['images']),
                     'passed_count': len(image_urls),
                     'mode': '2D',
-                    'perspective': perspective
+                    'perspective': perspective,
+                    'processing_time': round(duration_s, 2),
+                    'time_budget_s': time_budget_s,
                 })
+
+                try:
+                    log_generation(
+                        prompt=requirement,
+                        images=result.get('images') or [],
+                        job_id=job_id,
+                        analysis=result.get('analysis'),
+                        status="success",
+                        duration=duration_s,
+                        extra={
+                            "mode": "2D",
+                            "perspective": perspective,
+                            "image_urls": image_urls,
+                        }
+                    )
+                except Exception as log_err:
+                    logger.warning(f"[Job {job_id}] 记录生成日志失败: {log_err}")
                 return
             else:
                 error_msg = result.get('error', '2D生成失败')
-                _update_job(job_id, status='failed', stage='generate', error=error_msg)
+                duration_s = time.time() - job_wall_start
+                _update_job(job_id, status='failed', stage='generate', progress=100, error=error_msg, details={
+                    'type': 'generate',
+                    'mode': '2D',
+                    'perspective': perspective,
+                    'processing_time': round(duration_s, 2),
+                    'time_budget_s': time_budget_s,
+                })
                 return
 
         # 3D模式：使用原有的生成流程
@@ -370,9 +426,19 @@ def _run_generation_job(job_id: str, requirement: str):
             logger.info(f"[Job {job_id}] 使用预分析结果: {pre_analysis}")
             
             # 仍需进行合规检查
+            if not _ensure_budget('analyze'):
+                return
             is_compliant, reason = local_agent.check_compliance(requirement)
             if not is_compliant:
-                _update_job(job_id, status='failed', stage='analyze', error=f"内容不合规: {reason}")
+                duration_s = time.time() - job_wall_start
+                _update_job(job_id, status='failed', stage='analyze', progress=100, error=f"内容不合规: {reason}", details={
+                    'type': 'analysis',
+                    'code': 'COMPLIANCE',
+                    'compliant': False,
+                    'reason': reason,
+                    'processing_time': round(duration_s, 2),
+                    'time_budget_s': time_budget_s,
+                })
                 return
             
             analysis = pre_analysis.copy()
@@ -382,9 +448,19 @@ def _run_generation_job(job_id: str, requirement: str):
                     analysis[key] = ''
         else:
             # 步骤1: 合规检查和内容分析
+            if not _ensure_budget('analyze'):
+                return
             agent_result = local_agent.process_content(requirement)
             if not agent_result['compliant']:
-                _update_job(job_id, status='failed', stage='analyze', error=f"内容不合规: {agent_result['reason']}")
+                duration_s = time.time() - job_wall_start
+                _update_job(job_id, status='failed', stage='analyze', progress=100, error=f"内容不合规: {agent_result['reason']}", details={
+                    'type': 'analysis',
+                    'code': 'COMPLIANCE',
+                    'compliant': False,
+                    'reason': agent_result.get('reason'),
+                    'processing_time': round(duration_s, 2),
+                    'time_budget_s': time_budget_s,
+                })
                 return
 
             analysis = agent_result['analysis']
@@ -394,6 +470,8 @@ def _run_generation_job(job_id: str, requirement: str):
         _update_job(job_id, analysis=analysis, progress=15)
 
         # 步骤2: 表情与动作分析
+        if not _ensure_budget('match'):
+            return
         _update_job(job_id, stage='match', progress=25)
         expression_info = local_head.analyze_user_requirement(requirement)
         
@@ -408,14 +486,19 @@ def _run_generation_job(job_id: str, requirement: str):
         _append_log(job_id, f"动作类型: {action_type}")
 
         # 步骤3: 选择与组合基础图片
+        if not _ensure_budget('compose'):
+            return
         _update_job(job_id, stage='compose', progress=35)
         processor_result = local_processor.process_user_requirement(requirement, log_callback=lambda t: _append_log(job_id, t))
         if not processor_result['success']:
-            _update_job(job_id, status='failed', stage='compose', error=processor_result.get('error', '图片处理失败'), details={
+            duration_s = time.time() - job_wall_start
+            _update_job(job_id, status='failed', stage='compose', progress=100, error=processor_result.get('error', '图片处理失败'), details={
                 'action_type': processor_result.get('action_type'),
                 'body_images': processor_result.get('body_images', []),
                 'head_images': processor_result.get('head_images', []),
-                'total_generated': processor_result.get('total_generated', 0)
+                'total_generated': processor_result.get('total_generated', 0),
+                'processing_time': round(duration_s, 2),
+                'time_budget_s': time_budget_s,
             })
             return
 
@@ -424,6 +507,8 @@ def _run_generation_job(job_id: str, requirement: str):
 
         # 步骤4-9: 统一处理配饰（服装、手拿、头戴）
         final_images = combined_images
+        if not _ensure_budget('decorate'):
+            return
         _update_job(job_id, stage='decorate', progress=50)
 
         # 构建配饰信息字典
@@ -470,11 +555,22 @@ def _run_generation_job(job_id: str, requirement: str):
             _update_job(job_id, progress=80)
         
         # 最终 Gate 检查
-        logger.debug(f"[配饰处理] 开始最终 Gate 检查，待检查图片数: {len(final_images)}")
-        final_images = local_controller.final_gate_check(final_images)
-        logger.debug(f"[配饰处理] Gate 检查完成，通过图片数: {len(final_images)}")
+        if not _ensure_budget('gate'):
+            return
+        _update_job(job_id, stage='gate', progress=85)
+        pre_gate_images = list(final_images or [])
+        logger.debug(f"[配饰处理] 开始最终 Gate 检查，待检查图片数: {len(pre_gate_images)}")
+        passed_images = local_controller.final_gate_check(pre_gate_images)
+        logger.debug(f"[配饰处理] Gate 检查完成，通过图片数: {len(passed_images)}")
+        if pre_gate_images and len(passed_images) != len(pre_gate_images):
+            _append_log(job_id, f"最终Gate未全部通过（{len(passed_images)}/{len(pre_gate_images)}），整组图片不展示")
+            final_images = []
+        else:
+            final_images = passed_images
 
         # 步骤10: 验证图片并转为URL
+        if not _ensure_budget('validate'):
+            return
         _update_job(job_id, stage='validate', progress=90)
         validated_images = []
         for img_path in final_images:
@@ -482,10 +578,13 @@ def _run_generation_job(job_id: str, requirement: str):
                 validated_images.append(img_path)
 
         if len(validated_images) == 0:
-            _update_job(job_id, status='failed', error='图片生成过程中出现问题，没有找到生成的文件', details={
+            duration_s = time.time() - job_wall_start
+            _update_job(job_id, status='failed', stage='validate', progress=100, error='图片生成过程中出现问题，没有找到生成的文件', details={
                 'generated_count': len(final_images),
                 'passed_count': 0,
-                'reason': '图片文件不存在'
+                'reason': '图片文件不存在',
+                'processing_time': round(duration_s, 2),
+                'time_budget_s': time_budget_s,
             })
             return
 
@@ -498,15 +597,41 @@ def _run_generation_job(job_id: str, requirement: str):
                 img_url = f"/{relative_path.replace(os.sep, '/')}"
             image_urls.append(img_url)
 
+        duration_s = time.time() - job_wall_start
         _update_job(job_id, images=image_urls, progress=100, stage='done', status='succeeded', details={
             'generated_count': len(final_images),
-            'passed_count': len(validated_images)
+            'passed_count': len(validated_images),
+            'processing_time': round(duration_s, 2),
+            'time_budget_s': time_budget_s,
         })
+
+        try:
+            log_generation(
+                prompt=requirement,
+                images=validated_images,
+                job_id=job_id,
+                analysis=analysis,
+                status="success",
+                duration=duration_s,
+                extra={
+                    "mode": "3D",
+                    "image_urls": image_urls,
+                    "generated_count": len(final_images),
+                    "passed_count": len(validated_images),
+                }
+            )
+        except Exception as log_err:
+            logger.warning(f"[Job {job_id}] 记录生成日志失败: {log_err}")
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        _update_job(job_id, status='failed', error=f'服务器错误: {str(e)}')
+        duration_s = time.time() - job_wall_start
+        _update_job(job_id, status='failed', stage='error', progress=100, error=f'服务器错误: {str(e)}', details={
+            'type': 'exception',
+            'processing_time': round(duration_s, 2),
+            'time_budget_s': time_budget_s,
+        })
 
 
 # 配置output文件夹为静态目录
@@ -622,7 +747,7 @@ def list_2d_assets():
 
 @app.route('/api/2d_editor/compose', methods=['POST'])
 def compose_2d_editor_image():
-    """2D 编辑器拼装接口：给定 head/body 素材，调用 per-data-2D.py 输出透底预览(2000x2000) + 白底底图(1024x1200)"""
+    """2D 编辑器拼装接口：给定 head/body 素材，调用 per-data-2D.py 输出透底预览(2000x2000) + 灰底底图(1024x1200)"""
     try:
         data = request.get_json() or {}
         head_url = data.get('head_url') or ''
@@ -663,17 +788,24 @@ def compose_2d_editor_image():
         if isinstance(result_path, str) and os.path.exists(result_path):
             base_path = result_path
 
-        expected_white_bg_path = f"{os.path.splitext(out_path)[0]}_white_bg.png"
-        if not base_path or not base_path.lower().endswith('_white_bg.png'):
-            if os.path.exists(expected_white_bg_path):
+        expected_gray_bg_path = f"{os.path.splitext(out_path)[0]}_gray_bg.png"
+        expected_white_bg_path = f"{os.path.splitext(out_path)[0]}_white_bg.png"  # 兼容旧产物
+        if not base_path or not base_path.lower().endswith(('_gray_bg.png', '_white_bg.png')):
+            if os.path.exists(expected_gray_bg_path):
+                base_path = expected_gray_bg_path
+            elif os.path.exists(expected_white_bg_path):
                 base_path = expected_white_bg_path
+            elif hasattr(per_data_2d, 'create_gray_background_image'):
+                created_path = per_data_2d.create_gray_background_image(preview_path, out_dir)
+                if isinstance(created_path, str) and os.path.exists(created_path):
+                    base_path = created_path
             elif hasattr(per_data_2d, 'create_white_background_image'):
                 created_path = per_data_2d.create_white_background_image(preview_path, out_dir)
                 if isinstance(created_path, str) and os.path.exists(created_path):
                     base_path = created_path
 
         if not base_path or not os.path.exists(base_path):
-            return jsonify({'success': False, 'error': '白底图生成失败'}), 500
+            return jsonify({'success': False, 'error': '灰底图生成失败'}), 500
 
         preview_url = f"/{preview_path.replace(os.sep, '/')}"
         base_image_url = f"/{base_path.replace(os.sep, '/')}"
@@ -746,7 +878,8 @@ def start_generate():
             logger.warning(f"任务提交失败: {submit_result.get('error')}")
             return jsonify({
                 'success': False, 
-                'error': submit_result.get('error', '队列已满')
+                'error': submit_result.get('error', '队列已满'),
+                'code': submit_result.get('code', 'QUEUE_FULL')
             }), 503
 
         queue_position = submit_result.get('queue_position', 0)
@@ -1710,6 +1843,9 @@ def gemini_flash_generations():
 
         data = request.get_json() or {}
         url = "https://modelservice.jdcloud.com/v1/images/gemini_flash/generations"
+        timeout_s = int(os.environ.get("LLM_IMAGE_TIMEOUT_S", "60"))
+        connect_timeout = int(os.environ.get("HTTP_CONNECT_TIMEOUT_S", "10"))
+        timeout = (connect_timeout, max(30, min(180, timeout_s)))
         headers = {
             "Accept": "*/*",
             "Accept-Encoding": "gzip, deflate, br",
@@ -1718,7 +1854,9 @@ def gemini_flash_generations():
             "Content-Type": "application/json",
             "User-Agent": "JoyIP-3D-System/1.0",
         }
-        resp = http_post(url, json=data, headers=headers, timeout=180)
+        from utils.limits import limit_image
+        with limit_image():
+            resp = http_post(url, json=data, headers=headers, timeout=timeout, use_retry=False)
         try:
             return jsonify(resp.json()), resp.status_code
         except Exception:

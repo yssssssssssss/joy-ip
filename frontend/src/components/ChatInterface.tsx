@@ -56,6 +56,7 @@ export default function ChatInterface() {
   const scrollAnimationFrameRef = useRef<number | null>(null)
   const autoScrollRef = useRef<boolean>(true) // 控制是否自动滚动
   const lastLogRef = useRef<string>('')
+  const runningLogsRef = useRef<string[]>([])
   const runningLogHideTimerRef = useRef<number | null>(null)
 
   const cancelRunningLogHide = () => {
@@ -76,6 +77,7 @@ export default function ChatInterface() {
 
   const clearRunningLog = () => {
     lastLogRef.current = ''
+    runningLogsRef.current = []
     setRunningLog('')
   }
 
@@ -87,8 +89,9 @@ export default function ChatInterface() {
     
     lastLogRef.current = trimmed
     
-    // 更新当前显示的日志（显示最新的）
-    setRunningLog(trimmed)
+    const nextLogs = [...runningLogsRef.current, trimmed]
+    runningLogsRef.current = nextLogs.slice(-8)
+    setRunningLog(runningLogsRef.current.join('\n'))
   }
 
   const handleThreeModalOpenChange = (nextOpen: boolean) => {
@@ -147,7 +150,7 @@ export default function ChatInterface() {
           : isLoading || chatStatus === 'generating'
             ? '后台处理中，请稍候...'
             : '')
-  const showRunningLogBar = runningLogActive && !!runningLogText
+  const showRunningLogBar = (runningLogActive || isLoading || chatStatus !== 'idle') && !!runningLogText
 
   // 监听消息变化，自动滚动到底部
   useEffect(() => {
@@ -249,7 +252,7 @@ export default function ChatInterface() {
 
   const clearChat = () => {
     if (pollTimerRef.current) {
-      clearInterval(pollTimerRef.current)
+      clearTimeout(pollTimerRef.current)
       pollTimerRef.current = null
     }
     cancelRunningLogHide()
@@ -366,6 +369,7 @@ export default function ChatInterface() {
             type: 'assistant',
             content: '已根据渲染图生成结果',
             images: [runRes.data.url],
+            mode: '3D',
             timestamp: new Date()
           }
           setMessages(prev => {
@@ -554,21 +558,25 @@ export default function ChatInterface() {
     clearRunningLog()
 
     try {
+      const modeAtStart = generationMode
       const startRes = await axios.post('/api/start_generate', {
         requirement: pendingPrompt,
         analysis: analysisResult,  // 传递用户确认/编辑后的分析结果
-        mode: generationMode,
-        perspective: generationMode === '2D' ? perspective : undefined,
-        ...(generationMode === '2D' && twoDBaseImageUrl ? { base_image_url: twoDBaseImageUrl } : {})
+        mode: modeAtStart,
+        perspective: modeAtStart === '2D' ? perspective : undefined,
+        ...(modeAtStart === '2D' && twoDBaseImageUrl ? { base_image_url: twoDBaseImageUrl } : {})
       }, { timeout: 0 })  // 取消超时限制
 
       if (!startRes.data?.success || !startRes.data?.job_id) {
         const needComplianceMsg = startRes.data?.code === 'COMPLIANCE' || String(startRes.data?.error || '').includes('违规')
+        const isQueueFull = startRes.data?.code === 'QUEUE_FULL'
         setComplianceError(!!needComplianceMsg)
         const errorMessage: Message = {
           id: (Date.now() + 1).toString(),
           type: 'assistant',
-          content: needComplianceMsg ? '输入内容不符合规范，请重新描述你的需求' : `生成失败: ${startRes.data?.error || '启动任务失败'}`,
+          content: needComplianceMsg
+            ? '输入内容不符合规范，请重新描述你的需求'
+            : (isQueueFull ? '当前排队人数较多，请稍后重试' : `生成失败: ${startRes.data?.error || '启动任务失败'}`),
           timestamp: new Date()
         }
         setMessages(prev => {
@@ -599,14 +607,51 @@ export default function ChatInterface() {
         })
       }
 
-      const checkStatus = async () => {
+      const computePollInterval = (job: any): number => {
+        const status = String(job?.status || '')
+        const stage = String(job?.stage || '')
+        const position = Number(job?.queue_position || 0)
+        const estimatedWait = Number(job?.estimated_wait || 0)
+
+        // 排队中：降低轮询频率，减少后端压力
+        if (status === 'queued' || position > 0) {
+          if (estimatedWait >= 120 || position >= 10) return 10000
+          if (estimatedWait >= 30 || position >= 3) return 6000
+          return 4000
+        }
+
+        // 运行中：根据阶段适当降频
+        if (status === 'running') {
+          if (stage === 'decorate' || stage === 'gate') return 2500
+          if (stage === 'compose') return 2000
+          return 1500
+        }
+
+        // 结束态不再轮询
+        return 0
+      }
+
+      const scheduleNextPoll = (delayMs: number) => {
+        if (pollTimerRef.current) {
+          clearTimeout(pollTimerRef.current)
+          pollTimerRef.current = null
+        }
+        if (delayMs <= 0) return
+        pollTimerRef.current = window.setTimeout(() => {
+          void pollOnce()
+        }, delayMs)
+      }
+
+      const pollOnce = async () => {
         try {
-          const res = await axios.get(`/api/job/${jobId}/status`, { timeout: 0 })  // 取消超时限制
-          if (!res.data?.success) return
+          const res = await axios.get(`/api/job/${jobId}/status`, { timeout: 0 })
+          if (!res.data?.success) {
+            scheduleNextPoll(2000)
+            return
+          }
           const job = res.data.job
           updateRunningLog(job?.latest_log)
 
-          // 更新队列信息
           if (job.queue_position > 0) {
             setQueueInfo({
               position: job.queue_position,
@@ -615,12 +660,12 @@ export default function ChatInterface() {
               waitingCount: 0
             })
           } else if (job.status === 'running') {
-            setQueueInfo(null) // 已开始执行，清除队列信息
+            setQueueInfo(null)
           }
 
           if (job.status === 'succeeded') {
             if (pollTimerRef.current) {
-              clearInterval(pollTimerRef.current)
+              clearTimeout(pollTimerRef.current)
               pollTimerRef.current = null
             }
             setComplianceError(false)
@@ -632,6 +677,7 @@ export default function ChatInterface() {
               type: 'assistant',
               content: '已为您生成图片',
               images: Array.isArray(job.images) ? job.images : [],
+              mode: modeAtStart,
               timestamp: new Date()
             }
             setMessages(prev => {
@@ -641,22 +687,23 @@ export default function ChatInterface() {
             })
             setIsLoading(false)
             scheduleRunningLogHide()
-          } else if (job.status === 'failed' || job.status === 'cancelled') {
+            return
+          }
+
+          if (job.status === 'failed' || job.status === 'cancelled') {
             if (pollTimerRef.current) {
-              clearInterval(pollTimerRef.current)
+              clearTimeout(pollTimerRef.current)
               pollTimerRef.current = null
             }
             setQueueInfo(null)
             setCurrentJobId(null)
             setChatStatus('idle')
-            const needComplianceMsg = job?.code === 'COMPLIANCE' || String(job?.error || '').includes('违规')
+            const needComplianceMsg = job?.details?.code === 'COMPLIANCE' || String(job?.error || '').includes('违规')
             setComplianceError(!!needComplianceMsg)
             const errorMessage: Message = {
               id: (Date.now() + 1).toString(),
               type: 'assistant',
-              content: job.status === 'cancelled'
-                ? '任务已取消'
-                : (needComplianceMsg ? '输入内容不符合规范，请重新描述你的需求' : `生成失败: ${job.error || '未知错误'}`),
+              content: needComplianceMsg ? '输入内容不符合规范，请重新描述你的需求' : `生成失败: ${job?.error || '任务失败'}`,
               timestamp: new Date()
             }
             setMessages(prev => {
@@ -666,37 +713,16 @@ export default function ChatInterface() {
             })
             setIsLoading(false)
             scheduleRunningLogHide()
+            return
           }
+
+          scheduleNextPoll(computePollInterval(job) || 2000)
         } catch (err) {
-          // ignore
+          scheduleNextPoll(3000)
         }
       }
 
-      await checkStatus()
-      // 动态轮询间隔：前60秒每1秒检查一次，之后每2秒检查一次
-      let pollCount = 0
-      const dynamicPoll = async () => {
-        pollCount++
-        await checkStatus()
-        
-        // 根据轮询次数动态调整间隔
-        const nextInterval = pollCount <= 60 ? 1000 : 2000
-        
-        if (pollTimerRef.current) {
-          clearInterval(pollTimerRef.current)
-          pollTimerRef.current = window.setInterval(checkStatus, nextInterval)
-        }
-      }
-      
-      pollTimerRef.current = window.setInterval(checkStatus, 1000)  // 初始1秒间隔
-      
-      // 60秒后切换到2秒间隔
-      setTimeout(() => {
-        if (pollTimerRef.current) {
-          clearInterval(pollTimerRef.current)
-          pollTimerRef.current = window.setInterval(checkStatus, 2000)
-        }
-      }, 60000)
+      await pollOnce()
     } catch (error: any) {
       let errorText = '生成失败: 未知错误'
       if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
@@ -744,7 +770,7 @@ export default function ChatInterface() {
     try {
       await axios.post(`/api/job/${currentJobId}/cancel`)
       if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current)
+        clearTimeout(pollTimerRef.current)
         pollTimerRef.current = null
       }
       setQueueInfo(null)
@@ -773,7 +799,7 @@ export default function ChatInterface() {
     const el = scrollContainerRef.current
     return () => {
       if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current)
+        clearTimeout(pollTimerRef.current)
         pollTimerRef.current = null
       }
       cancelRunningLogHide()
@@ -959,7 +985,7 @@ export default function ChatInterface() {
         onGenerate={handleThreeSend}
       />
       <TwoDEditorModal
-        open={twoDEditorOpen && generationMode === '2D'}
+        open={twoDEditorOpen}
         onOpenChange={setTwoDEditorOpen}
         perspective={perspective}
         onUse={(baseImageUrl) => setTwoDBaseImageUrl(baseImageUrl)}

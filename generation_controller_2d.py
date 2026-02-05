@@ -10,7 +10,7 @@
 
 import os
 import sys
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import logging
@@ -27,9 +27,9 @@ ENABLE_GATE_CHECK = str(os.environ.get("ENABLE_GATE_CHECK", "1")).strip().lower(
 GATE_CHECK_SCOPE = str(os.environ.get("GATE_CHECK_SCOPE", "hats")).strip().lower()
 
 # 并行处理配置
-MAX_PARALLEL_WORKERS = int(os.environ.get("MAX_PARALLEL_WORKERS", "2"))
+MAX_PARALLEL_WORKERS = int(os.environ.get("MAX_PARALLEL_WORKERS", "4"))
 # 2D 专属并行配置（降低到2以避免API频率限制）
-MAX_PARALLEL_WORKERS_2D = int(os.environ.get("MAX_PARALLEL_WORKERS_2D", "2"))
+MAX_PARALLEL_WORKERS_2D = int(os.environ.get("MAX_PARALLEL_WORKERS_2D", "4"))
 
 
 class GenerationController2D:
@@ -277,16 +277,19 @@ class GenerationController2D:
             
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
-                original_path = image_paths[idx]
                 try:
                     result = future.result(timeout=90)  # 90秒超时
-                    results[idx] = result if result else original_path
-                    logger.info(f"[{accessory_type}] 图片 {idx+1}/{len(image_paths)} 处理完成")
+                    results[idx] = result
+                    if result:
+                        logger.info(f"[{accessory_type}] 图片 {idx+1}/{len(image_paths)} 处理完成")
+                    else:
+                        logger.warning(f"[{accessory_type}] 图片 {idx+1}/{len(image_paths)} 处理失败，不展示该路图片")
                 except Exception as e:
-                    logger.warning(f"[{accessory_type}] 图片 {idx+1} 处理失败: {str(e)}")
-                    results[idx] = original_path
+                    logger.warning(f"[{accessory_type}] 图片 {idx+1} 处理失败: {str(e)}，不展示该路图片")
+                    results[idx] = None
         
-        return [results[i] for i in range(len(image_paths))]
+        ordered = [results.get(i) for i in range(len(image_paths))]
+        return [p for p in ordered if p]
     
     def _process_accessory_single(self, image_paths: List[str], accessory_info: str,
                                    process_func, accessory_type: str, mode: str = "3d") -> List[str]:
@@ -294,7 +297,8 @@ class GenerationController2D:
         processed_images = []
         for image_path in image_paths:
             result = self._process_single_image(image_path, accessory_info, process_func, mode)
-            processed_images.append(result if result else image_path)
+            if result:
+                processed_images.append(result)
         return processed_images
     
     def _process_single_image(self, image_path: str, accessory_info: str,
@@ -443,9 +447,15 @@ class GenerationController2D:
             return (False, str(e))
 
     
-    def generate_complete_flow(self, requirement: str, perspective: str = "正视角",
-                                output_dir: str = "output", pre_analysis: Dict = None,
-                                base_image_path: str = None) -> Dict:
+    def generate_complete_flow(
+        self,
+        requirement: str,
+        perspective: str = "正视角",
+        output_dir: str = "output",
+        pre_analysis: Dict = None,
+        base_image_path: str = None,
+        log_callback: Optional[Callable[[str], None]] = None
+    ) -> Dict:
         """
         2D完整图片生成流程
         
@@ -468,6 +478,26 @@ class GenerationController2D:
             "analysis": None,
             "error": None
         }
+
+        def _emit(msg: str):
+            if not isinstance(msg, str):
+                return
+            s = msg.strip()
+            if not s:
+                return
+            result["logs"].append(s)
+            if log_callback:
+                try:
+                    log_callback(s)
+                except Exception:
+                    pass
+
+        def _store_many(lines: List[str]):
+            if not isinstance(lines, list):
+                return
+            for line in lines:
+                if isinstance(line, str) and line.strip():
+                    result["logs"].append(line.strip())
         
         # 步骤0: 内容分析和合规检查
         try:
@@ -479,27 +509,28 @@ class GenerationController2D:
                 if '视角' not in analysis:
                     analysis['视角'] = perspective
                 result["analysis"] = analysis
-                result["logs"].append(f"使用预分析结果: {analysis}")
+                _emit(f"使用预分析结果: {analysis}")
                 
                 # 仍需进行合规检查（检查配件内容）
                 if not self.check_content_compliance(analysis):
                     result["error"] = "内容不合规"
-                    result["logs"].append("配件内容合规检查未通过")
+                    _emit("配件内容合规检查未通过")
                     return result
             else:
                 # 执行内容分析
+                _emit("开始内容分析")
                 process_result = self.content_agent.process_content_2d(requirement, perspective)
                 if not process_result.get('success') or not process_result.get('compliant'):
                     result["error"] = process_result.get('reason', '内容不合规')
-                    result["logs"].append(f"内容分析失败: {result['error']}")
+                    _emit(f"内容分析失败: {result['error']}")
                     return result
                 
                 analysis = process_result.get('analysis', {})
                 result["analysis"] = analysis
-                result["logs"].append(f"内容分析完成: {analysis}")
+                _emit(f"内容分析完成: {analysis}")
         except Exception as e:
             result["error"] = f"内容分析异常: {str(e)}"
-            result["logs"].append(result["error"])
+            _emit(result["error"])
             return result
         
         images = []
@@ -511,56 +542,68 @@ class GenerationController2D:
                 return result
             if not os.path.exists(base_image_path):
                 result["error"] = f"底图文件不存在: {base_image_path}"
-                result["logs"].append(result["error"])
+                _emit(result["error"])
                 return result
 
             images = [base_image_path]
-            result["logs"].append(f"使用底图，跳过头/身匹配与拼装: {base_image_path}")
+            _emit(f"使用底图，跳过头/身匹配与拼装: {base_image_path}")
         else:
             # 步骤1: 匹配头像和身体（各选2张，组合生成4张）
             try:
+                _emit("开始匹配头像素材")
                 head_matches, head_logs = self.head_matcher.find_one_best_match_2d(
                     requirement, perspective, top_k=5, num_select=2
                 )
-                result["logs"].extend(head_logs)
+                _store_many(head_logs)
+                _emit(f"头像匹配完成: {len(head_matches)} 张")
 
+                _emit("开始匹配身体素材")
                 body_matches, body_logs = self.body_matcher.find_one_best_match_2d(
                     requirement, perspective, top_k=5, num_select=2
                 )
-                result["logs"].extend(body_logs)
+                _store_many(body_logs)
+                _emit(f"身体匹配完成: {len(body_matches)} 张")
 
                 if not head_matches or not body_matches:
                     result["error"] = "未找到匹配的头像或身体图片"
                     return result
 
-                result["logs"].append(f"匹配完成: head={len(head_matches)}, body={len(body_matches)}")
+                _emit(f"匹配完成: head={len(head_matches)}, body={len(body_matches)}")
             except Exception as e:
                 result["error"] = f"图片匹配异常: {str(e)}"
-                result["logs"].append(result["error"])
+                _emit(result["error"])
                 return result
 
             # 步骤2: 生成基础拼接图片
             action_type = analysis.get('动作', '站姿')
+            _emit(f"开始生成基础拼接图片（动作: {action_type}）")
             images = self.generate_step1_images(head_matches, body_matches, output_dir, action_type)
 
             if not images:
                 result["error"] = "未能生成基础图片"
                 return result
 
-            result["logs"].append(f"基础图片生成完成: {len(images)} 张")
+            _emit(f"基础图片生成完成: {len(images)} 张")
         
         # 步骤3: 处理配件
+        _emit("开始处理配件")
         images = self.process_accessories_unified(images, analysis, output_dir)
-        result["logs"].append(f"配件处理完成: {len(images)} 张")
+        _emit(f"配件处理完成: {len(images)} 张")
         
         # 步骤4: 处理背景（如果有）
         if analysis.get('背景'):
+            _emit(f"开始处理背景: {analysis.get('背景')}")
             images = self.process_background(images, analysis['背景'], output_dir)
-            result["logs"].append(f"背景处理完成: {len(images)} 张")
+            _emit(f"背景处理完成: {len(images)} 张")
         
         # 步骤5: 最终Gate检查
-        images = self.final_gate_check(images)
-        result["logs"].append(f"Gate检查完成: {len(images)} 张通过")
+        pre_gate_images = list(images or [])
+        _emit("开始最终Gate检查")
+        images = self.final_gate_check(pre_gate_images)
+        if pre_gate_images and len(images) != len(pre_gate_images):
+            _emit(f"最终Gate未全部通过（{len(images)}/{len(pre_gate_images)}），整组图片不展示")
+            images = []
+        _emit(f"Gate检查完成: {len(images)} 张通过")
         
         result["success"] = len(images) > 0
         result["images"] = images

@@ -6,22 +6,28 @@
 """
 
 import re
+import json
 import os
 import random
 import logging
+import threading
 from typing import Dict, List, Optional, Callable
 from .base_matcher import BaseMatcher
 from PIL import Image
 from sentence_transformers import SentenceTransformer, util
 # 使用全局 CLIP 管理器
 from utils.clip_manager import get_clip_model, get_clip_tokenizer
+from utils.limits import limit_text
 
 logger = logging.getLogger(__name__)
+
+_FOLDER_CLIP_CACHE_LOCK = threading.Lock()
+_FOLDER_CLIP_CACHE: dict[str, dict] = {}
 
 
 class HeadMatcher(BaseMatcher):
     """头像匹配器类"""
-    
+
     def __init__(self):
         """初始化头像匹配器"""
         super().__init__()
@@ -33,6 +39,38 @@ class HeadMatcher(BaseMatcher):
     def analyze_user_requirement(self, requirement: str) -> Dict[str, str]:
         """分析用户需求，提取五个维度的特征"""
         try:
+            enable_en_query = str(os.environ.get("ENABLE_HEAD_CLIP_QUERY_EN", "1")).strip().lower() in ("1", "true", "yes")
+
+            # 优先走 JSON 输出（更稳定；也更容易严格提取“英文检索”）
+            if enable_en_query:
+                json_prompt = (
+                    f"用户需求：\"{requirement}\"\n"
+                    "\n"
+                    "请提取头像/脸部的视觉特征，并仅输出一个 JSON 对象（不要 Markdown，不要解释）。\n"
+                    "JSON 必须包含以下字段（缺失则写\"未识别\"）：\n"
+                    "- 眼睛形状\n"
+                    "- 嘴型\n"
+                    "- 表情\n"
+                    "- 脸部动态\n"
+                    "- 情感强度\n"
+                    "- 英文检索\n"
+                    "\n"
+                    "其中：\n"
+                    "- 英文检索：用于图像检索的英文短语（尽量短，逗号分隔；只描述头像/脸部特征；不要包含中文；不要解释）。\n"
+                )
+                system_prompt = "你是一个专业的需求分析专家。请严格按要求输出 JSON。"
+                analysis_text = self._call_ai(
+                    system_prompt,
+                    json_prompt,
+                    temperature=0.0,
+                    max_tokens=256,
+                    response_mime_type="application/json",
+                )
+                parsed = self._parse_requirement_analysis_json(analysis_text)
+                if parsed:
+                    return parsed
+
+            # 回退：原始“多行文本”解析（在部分模型/网关下更兼容）
             prompt = (
                 f"将\"{requirement}\"按照\"眼睛形状、嘴型、表情、脸部动态、情感强度\"五个维度进行分析，精简得到的结果，并将结果按照以下形式输出：\n"
                 "眼睛形状：\n"
@@ -41,8 +79,14 @@ class HeadMatcher(BaseMatcher):
                 "脸部动态：\n"
                 "情感强度：\n"
             )
+            if enable_en_query:
+                prompt += (
+                    "\n"
+                    "再补充一行用于图像检索的英文短语（只输出英文短语，不要解释，不要加引号；尽量短、逗号分隔；只描述头像/脸部特征）：\n"
+                    "英文检索：\n"
+                )
             system_prompt = "你是一个专业的需求分析专家。请根据用户的需求描述，分析出对应的视觉特征。"
-            analysis_text = self._call_ai(system_prompt, prompt, temperature=0.3, max_tokens=500)
+            analysis_text = self._call_ai(system_prompt, prompt, temperature=0.1, max_tokens=200)
             if analysis_text:
                 return self._parse_requirement_analysis(analysis_text)
             return {dim: "未识别" for dim in self.dimensions}
@@ -50,6 +94,57 @@ class HeadMatcher(BaseMatcher):
         except Exception as e:
             logger.info(f"分析用户需求失败: {str(e)}")
             return {dim: "未识别" for dim in self.dimensions}
+
+    def _parse_requirement_analysis_json(self, analysis_text: str) -> Dict[str, str]:
+        """解析 JSON 格式的需求分析结果（更稳定）。"""
+        try:
+            if not isinstance(analysis_text, str) or not analysis_text.strip():
+                return {}
+
+            t = analysis_text.strip()
+            if t.startswith("```"):
+                t = re.sub(r"^```(?:json)?", "", t, flags=re.IGNORECASE).strip()
+                t = re.sub(r"```$", "", t).strip()
+
+            # 容错：截取第一个 {...} 区间
+            start = t.find("{")
+            end = t.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                t = t[start : end + 1]
+
+            obj = json.loads(t)
+            if not isinstance(obj, dict):
+                return {}
+
+            def _pick(*keys: str):
+                for k in keys:
+                    if k in obj:
+                        return obj.get(k)
+                return None
+
+            def _to_str(v) -> str:
+                if v is None:
+                    return ""
+                if isinstance(v, str):
+                    return v.strip()
+                if isinstance(v, (int, float)):
+                    return str(v)
+                if isinstance(v, list):
+                    parts = [str(x).strip() for x in v if x is not None and str(x).strip()]
+                    return ", ".join(parts)
+                return str(v).strip()
+
+            result: Dict[str, str] = {dim: "未识别" for dim in self.dimensions}
+            result["眼睛形状"] = _to_str(_pick("眼睛形状", "eye", "eyes", "eye_shape", "eyeShape")) or "未识别"
+            result["嘴型"] = _to_str(_pick("嘴型", "mouth", "mouth_shape", "mouthShape")) or "未识别"
+            result["表情"] = _to_str(_pick("表情", "expression")) or "未识别"
+            result["脸部动态"] = _to_str(_pick("脸部动态", "face_motion", "faceMotion", "facial_motion", "facialMotion")) or "未识别"
+            result["情感强度"] = _to_str(_pick("情感强度", "emotion_intensity", "emotionIntensity", "intensity")) or "未识别"
+            result["英文检索"] = _to_str(_pick("英文检索", "en_query", "enQuery", "english_query", "englishQuery", "query", "clip_query", "clipQuery"))
+            return result
+
+        except Exception:
+            return {}
     
     def _parse_requirement_analysis(self, analysis_text: str) -> Dict[str, str]:
         """解析需求分析结果"""
@@ -69,9 +164,65 @@ class HeadMatcher(BaseMatcher):
                 result[key] = match.group(1).strip()
             else:
                 result[key] = "未识别"
-        
+
+        # 可选：英文检索 query（用于 CLIP 文本嵌入）
+        try:
+            m = re.search(r"英文检索[：:]\s*([^\n]+)", analysis_text, flags=re.IGNORECASE)
+            if m:
+                result["英文检索"] = m.group(1).strip()
+            else:
+                result["英文检索"] = ""
+        except Exception:
+            result["英文检索"] = ""
+
         return result
-    
+
+    def _clean_clip_query_text(self, text: str) -> str:
+        """清洗 CLIP 检索 query，尽量得到一行短文本。"""
+        if not isinstance(text, str):
+            return ""
+        t = text.strip().strip('"').strip("'").strip()
+        if not t:
+            return ""
+        t = t.replace("\r", " ").replace("\n", " ").strip()
+        t = re.sub(r"^(?:英文检索|English\s*(?:query|search|clip\s*query)?)\s*[：:]\s*", "", t, flags=re.IGNORECASE).strip()
+        t = re.sub(r"\s+", " ", t).strip()
+        return t
+
+    def _has_english_letters(self, text: str) -> bool:
+        try:
+            return bool(re.search(r"[A-Za-z]", text or ""))
+        except Exception:
+            return False
+
+    def _build_clip_query_text(self, requirement: str, requirement_features: Optional[Dict[str, str]]) -> str:
+        """
+        构造用于 CLIP 检索的文本 query：
+        1) 优先使用 LLM 生成的“英文检索”
+        2) 失败回退到旧的表情关键词提取/映射
+        3) 再兜底使用原始 requirement
+        """
+        candidate = ""
+        if isinstance(requirement_features, dict):
+            candidate = requirement_features.get("英文检索") or ""
+        candidate = self._clean_clip_query_text(candidate)
+        if candidate and self._has_english_letters(candidate):
+            if "face" not in candidate.lower() and "head" not in candidate.lower():
+                candidate = f"{candidate} face"
+            return candidate
+
+        expr_text = self._clean_clip_query_text(self._extract_expression_text(requirement))
+        if expr_text:
+            if self._has_english_letters(expr_text):
+                if "face" not in expr_text.lower() and "head" not in expr_text.lower():
+                    expr_text = f"{expr_text} face"
+            return expr_text
+
+        fallback = self._clean_clip_query_text(requirement)
+        if fallback and "face" not in fallback.lower() and "head" not in fallback.lower():
+            fallback = f"{fallback} face"
+        return fallback
+
     def find_best_matches(self, requirement: str, top_k: int = 3, log_callback: Optional[Callable[[str], None]] = None) -> tuple:
         """找到最匹配的头像图片，返回结果和处理日志；支持日志回调实时输出"""
         if self.df.empty:
@@ -161,10 +312,8 @@ class HeadMatcher(BaseMatcher):
         
         # 使用 CLIP 对“表情”文本与图片进行相似度检索
         requirement_features = self.analyze_user_requirement(requirement)
-        expr_text = self._extract_expression_text(requirement)
-        if not expr_text:
-            expr_text = requirement_features.get('表情', '') or requirement
-        logger.info(f"头像CLIP检索文本: {expr_text}")
+        query_text = self._build_clip_query_text(requirement, requirement_features)
+        logger.info(f"头像CLIP检索文本: {query_text}")
         log_msg = f"头像需求分析结果: {requirement_features}"
         logger.info(log_msg)
         processing_logs.append(log_msg)
@@ -181,9 +330,9 @@ class HeadMatcher(BaseMatcher):
         # 文本嵌入（确保不超过 CLIP 最大序列长度 77）
         try:
             # 先用 CLIP 分词器安全截断，避免 77/82 等长度冲突
-            expr_text_safe = self._truncate_clip_text(expr_text)
+            query_text_safe = self._truncate_clip_text(query_text)
             # SentenceTransformer.encode 文本参数为位置参数或 sentences 关键字
-            text_emb = self._clip_model_ref.encode([expr_text_safe], convert_to_tensor=True, normalize_embeddings=True)
+            text_emb = self._clip_model_ref.encode([query_text_safe], convert_to_tensor=True, normalize_embeddings=True)
         except Exception as e:
             err = f"文本向量化失败: {str(e)}"
             logger.error(err)
@@ -192,23 +341,87 @@ class HeadMatcher(BaseMatcher):
                 log_callback(err)
             return [], processing_logs
 
-        # 图片检索评分
-        scores = []
-        for img_path in all_images:
-            img_name = os.path.basename(img_path)
+        def _folder_fingerprint(paths: List[str]) -> tuple[int, float]:
             try:
-                image = Image.open(img_path).convert('RGB')
-                # SentenceTransformer.encode 图片参数为位置参数（传入 PIL.Image 列表）
-                img_emb = self._clip_model_ref.encode([image], convert_to_tensor=True, normalize_embeddings=True)
-                sim = util.cos_sim(img_emb, text_emb)[0][0].item()
-                total_score = float(sim)
+                mt = 0.0
+                for p in paths:
+                    try:
+                        mt = max(mt, os.path.getmtime(p))
+                    except Exception:
+                        pass
+                return (len(paths), mt)
+            except Exception:
+                return (len(paths), 0.0)
+
+        def _get_or_build_folder_cache(paths: List[str]) -> dict:
+            fingerprint = _folder_fingerprint(paths)
+            key = os.path.abspath(folder_path)
+            with _FOLDER_CLIP_CACHE_LOCK:
+                cached = _FOLDER_CLIP_CACHE.get(key)
+                if cached and cached.get("fingerprint") == fingerprint:
+                    return cached
+
+            # 缓存未命中：批量构建 embeddings（一次性编码，显著降低重复开销）
+            images: List[Image.Image] = []
+            valid_paths: List[str] = []
+            names: List[str] = []
+            for p in paths:
+                try:
+                    with Image.open(p) as im:
+                        images.append(im.convert("RGB"))
+                    valid_paths.append(p)
+                    names.append(os.path.basename(p))
+                except Exception as e:
+                    err = f"图片加载失败 {os.path.basename(p)}: {str(e)}"
+                    logger.error(err)
+                    processing_logs.append(err)
+                    if log_callback:
+                        log_callback(err)
+
+            if not images:
+                return {"fingerprint": fingerprint, "paths": [], "names": [], "embeddings": None}
+
+            try:
+                img_embs = self._clip_model_ref.encode(images, convert_to_tensor=True, normalize_embeddings=True)
             except Exception as e:
-                total_score = 0.0
-                err = f"图片向量化失败 {img_name}: {str(e)}"
+                err = f"文件夹图片向量化失败: {str(e)}"
                 logger.error(err)
                 processing_logs.append(err)
                 if log_callback:
                     log_callback(err)
+                return {"fingerprint": fingerprint, "paths": [], "names": [], "embeddings": None}
+
+            built = {"fingerprint": fingerprint, "paths": valid_paths, "names": names, "embeddings": img_embs}
+            with _FOLDER_CLIP_CACHE_LOCK:
+                _FOLDER_CLIP_CACHE[key] = built
+            return built
+
+        folder_cache = _get_or_build_folder_cache(all_images)
+        img_embs = folder_cache.get("embeddings")
+        img_paths = folder_cache.get("paths") or []
+        img_names = folder_cache.get("names") or []
+
+        if img_embs is None or not img_paths:
+            return [], processing_logs
+
+        # 图片检索评分（向量化后批量相似度计算）
+        try:
+            sims = util.cos_sim(img_embs, text_emb).squeeze(1).tolist()
+        except Exception as e:
+            err = f"相似度计算失败: {str(e)}"
+            logger.error(err)
+            processing_logs.append(err)
+            if log_callback:
+                log_callback(err)
+            return [], processing_logs
+
+        scores = []
+        for idx, img_path in enumerate(img_paths):
+            img_name = img_names[idx] if idx < len(img_names) else os.path.basename(img_path)
+            try:
+                total_score = float(sims[idx])
+            except Exception:
+                total_score = 0.0
 
             scores.append({
                 "image_name": img_name,
@@ -291,49 +504,101 @@ class HeadMatcher(BaseMatcher):
             return text
 
     def _translate_to_english(self, cn_text: str) -> str:
-        """使用大模型将中文表情关键词翻译为英文（用于CLIP检索）"""
+        """将中文表情关键词转为英文短语（用于CLIP检索）。
+
+        默认使用本地词典映射，避免额外大模型调用导致超时与吞吐下降。
+        如需启用大模型翻译，可设置环境变量 ENABLE_EXPR_LLM_TRANSLATION=1。
+        """
         try:
             if not cn_text or not cn_text.strip():
                 return ""
-            
-            # 使用共享 HTTP 客户端
-            from utils.http_client import http_post, parse_ai_response
-            
-            payload = {
-                "model": "doubao-seed-1.6-250615",
-                "contents": [
-                    {
-                        "role": "user",
-                        "parts": [
-                            {"text": f"Translate this Chinese facial expression to English for image search. Output ONLY the English phrase, no explanation.\nChinese: {cn_text}\nEnglish:"}
-                        ]
-                    }
-                ],
-                "temperature": 0,
-                "max_tokens": 30,
-                "stream": False
-            }
-            headers = {
-                "Authorization": f"Bearer {self.api_token}",
-                "Content-Type": "application/json"
+
+            cn = cn_text.strip()
+
+            # 1) 本地映射（优先）
+            mapping = {
+                "大笑": "laughing face",
+                "哈哈": "laughing face",
+                "微笑": "smiling face",
+                "笑": "smiling face",
+                "开心": "happy face",
+                "愉快": "happy face",
+                "高兴": "happy face",
+                "喜悦": "happy face",
+                "兴奋": "excited face",
+                "得意": "proud face",
+                "调皮": "playful face",
+                "疑惑": "confused face",
+                "思考": "thinking face",
+                "惊讶": "surprised face",
+                "震惊": "shocked face",
+                "吃惊": "surprised face",
+                "害羞": "shy face",
+                "脸红": "blushing face",
+                "羞涩": "shy face",
+                "愤怒": "angry face",
+                "生气": "angry face",
+                "怒视": "angry face",
+                "悲伤": "sad face",
+                "难过": "sad face",
+                "哭泣": "crying face",
+                "伤心": "sad face",
+                "哭": "crying face",
+                "冷漠": "neutral face",
+                "面瘫": "neutral face",
+                "无表情": "neutral face",
+                "平静": "calm face",
+                "紧张": "nervous face",
+                "放松": "relaxed face",
+                "眨眼": "winking face",
+                "闭眼": "eyes closed face",
             }
 
-            resp = http_post(self.api_url, json=payload, headers=headers, timeout=90)  # 90秒超时
-            resp.raise_for_status()
-            en_text = parse_ai_response(resp.json())
-            
-            if en_text:
-                # 清理结果
-                en_text = en_text.strip().strip('"\'').strip()
-                en_text = en_text.replace('\n', ' ').strip()
-                # 确保结果包含 "face" 以便CLIP更好理解
-                if en_text and 'face' not in en_text.lower():
-                    en_text = en_text + " face"
-                logger.debug(f"表情翻译(大模型): '{cn_text}' -> '{en_text}'")
-                return en_text
-            else:
-                logger.warning(f"表情翻译失败，使用原文: '{cn_text}'")
-                return cn_text
+            for k, v in mapping.items():
+                if k in cn:
+                    return v
+
+            # 2) 可选：大模型翻译（默认关闭）
+            enable_llm = str(os.environ.get("ENABLE_EXPR_LLM_TRANSLATION", "0")).strip().lower() in ("1", "true", "yes")
+            if enable_llm:
+                from utils.http_client import http_post, parse_ai_response
+                payload = {
+                    "model": os.environ.get("EXPR_TRANSLATION_MODEL", "doubao-seed-1.6-250615"),
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [
+                                {"text": f"Translate this Chinese facial expression to English for image search. Output ONLY the English phrase, no explanation.\nChinese: {cn}\nEnglish:"}
+                            ]
+                        }
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 30,
+                    "stream": False
+                }
+                headers = {
+                    "Authorization": f"Bearer {self.api_token}",
+                    "Content-Type": "application/json"
+                }
+
+                with limit_text():
+                    connect_timeout = int(os.environ.get("HTTP_CONNECT_TIMEOUT_S", "10"))
+                    resp = http_post(self.api_url, json=payload, headers=headers, timeout=(connect_timeout, 30), use_retry=False)
+                resp.raise_for_status()
+                en_text = parse_ai_response(resp.json())
+
+                if en_text:
+                    en_text = en_text.strip().strip('"\'').strip().replace('\n', ' ').strip()
+                    if en_text and 'face' not in en_text.lower():
+                        en_text = en_text + " face"
+                    logger.debug(f"表情翻译(大模型): '{cn}' -> '{en_text}'")
+                    return en_text
+
+            # 3) 兜底：中文 + face
+            fallback = cn
+            if 'face' not in fallback.lower():
+                fallback = fallback + " face"
+            return fallback
         except Exception as e:
             logger.warning(f"表情翻译异常: {e}，使用原文: '{cn_text}'")
             return cn_text

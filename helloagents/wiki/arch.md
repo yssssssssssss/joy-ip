@@ -7,6 +7,8 @@ flowchart TD
   FE -->|/api/*| BE[Flask 后端\napp_new.py]
   BE --> JM[JobManager\nutils/job_manager.py]
   JM --> PIPE[生成链路\nGenerationController* 等]
+  PIPE --> LIMIT[外部调用限流与超时治理\nutils/limits.py + utils/http_client.py]
+  LIMIT --> EXT[(外部模型服务\nJDCloud ModelService)]
   PIPE --> FS[(文件系统\noutput/ generated_images/)]
   BE --> FS
   FE -->|/output /generated_images| FS
@@ -42,5 +44,10 @@ sequenceDiagram
 ```
 
 ## 重大架构决策
-当前暂无独立 ADR 索引（后续在变更的 `how.md` 中维护并在此处追加链接）。
+完整 ADR 记录在各变更的 `how.md` 中，本章节提供索引。
+
+| adr_id | title | date | status | affected_modules | details |
+|--------|-------|------|--------|------------------|---------|
+| ADR-001 | 方案1保持单进程状态一致性 | 2026-02-02 | ✅已采纳 | backend | [how.md](../history/2026-02/202602022301_perf_4x_throughput/how.md) |
+| ADR-002 | 外部调用使用独立配额池并统一重试 | 2026-02-02 | ✅已采纳 | backend | [how.md](../history/2026-02/202602022301_perf_4x_throughput/how.md) |
 

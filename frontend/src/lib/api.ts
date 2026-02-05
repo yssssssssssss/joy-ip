@@ -36,6 +36,7 @@ export interface JobStatus {
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
   progress: number
   stage: string
+  stage_timings?: Record<string, { start?: number; end?: number; ms?: number }>
   analysis?: Record<string, string>
   images: string[]
   error?: string
@@ -60,6 +61,9 @@ export interface StartGenerateResponse {
     waiting_count: number
     max_concurrent: number
     avg_duration: number
+    p50_duration?: number
+    p95_duration?: number
+    queue_max_size?: number
   }
 }
 
@@ -68,6 +72,9 @@ export interface QueueStats {
   waiting_count: number
   max_concurrent: number
   avg_duration: number
+  p50_duration?: number
+  p95_duration?: number
+  queue_max_size?: number
 }
 
 /**

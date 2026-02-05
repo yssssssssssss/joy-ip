@@ -7,6 +7,7 @@ export interface Message {
   type: 'user' | 'assistant'
   content: string
   images?: string[]
+  mode?: '2D' | '3D'
   timestamp: Date
 }
 

@@ -24,6 +24,8 @@ def log_generation(
     analysis: Dict = None,
     status: str = "success",
     duration: float = None,
+    stage: str = None,
+    error_type: str = None,
     extra: Dict = None
 ) -> str:
     """
@@ -56,6 +58,10 @@ def log_generation(
         record["analysis"] = analysis
     if duration is not None:
         record["duration"] = round(duration, 2)
+    if stage:
+        record["stage"] = stage
+    if error_type:
+        record["error_type"] = error_type
     if extra:
         record.update(extra)
     

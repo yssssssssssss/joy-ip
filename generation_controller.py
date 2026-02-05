@@ -28,9 +28,8 @@ ENABLE_GATE_CHECK = str(os.environ.get("ENABLE_GATE_CHECK", "1")).strip().lower(
 GATE_CHECK_SCOPE = str(os.environ.get("GATE_CHECK_SCOPE", "hats")).strip().lower()
 
 # 并行处理配置
-# 优化：降低并发数以避免API频率限制（429错误）
-# 从4降低到2，减少同时发送的API请求数量
-MAX_PARALLEL_WORKERS = int(os.environ.get("MAX_PARALLEL_WORKERS", "2"))
+# 默认 4 路并行；如线上出现 429/超时雪崩，可通过环境变量降级到 2（或更低）
+MAX_PARALLEL_WORKERS = int(os.environ.get("MAX_PARALLEL_WORKERS", "4"))
 
 class GenerationController:
     """图片生成流程控制器"""
@@ -290,17 +289,20 @@ class GenerationController:
             # 收集结果
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
-                original_path = image_paths[idx]
                 try:
                     result = future.result(timeout=90)  # 90秒超时
-                    results[idx] = result if result else original_path
-                    logger.info(f"[{accessory_type}] 图片 {idx+1}/{len(image_paths)} 处理完成")
+                    results[idx] = result
+                    if result:
+                        logger.info(f"[{accessory_type}] 图片 {idx+1}/{len(image_paths)} 处理完成")
+                    else:
+                        logger.warning(f"[{accessory_type}] 图片 {idx+1}/{len(image_paths)} 处理失败，不展示该路图片")
                 except Exception as e:
-                    logger.warning(f"[{accessory_type}] 图片 {idx+1} 处理失败: {str(e)}")
-                    results[idx] = original_path
+                    logger.warning(f"[{accessory_type}] 图片 {idx+1} 处理失败: {str(e)}，不展示该路图片")
+                    results[idx] = None
         
-        # 按原始顺序返回结果
-        return [results[i] for i in range(len(image_paths))]
+        # 按原始顺序返回结果（失败的路由不展示）
+        ordered = [results.get(i) for i in range(len(image_paths))]
+        return [p for p in ordered if p]
     
     def _process_accessory_single(self, image_paths: List[str], accessory_info: str,
                                   process_func, accessory_type: str) -> List[str]:
@@ -308,7 +310,8 @@ class GenerationController:
         processed_images = []
         for image_path in image_paths:
             result = self._process_single_image(image_path, accessory_info, process_func)
-            processed_images.append(result if result else image_path)
+            if result:
+                processed_images.append(result)
         return processed_images
     
     def _process_single_image(self, image_path: str, accessory_info: str, 
@@ -526,7 +529,11 @@ class GenerationController:
             images = self.process_background(images, analysis['背景'], output_dir)
         
         # 最终 Gate 检查：在展示前对所有图片进行质量检查
-        images = self.final_gate_check(images)
+        pre_gate_images = list(images or [])
+        images = self.final_gate_check(pre_gate_images)
+        if pre_gate_images and len(images) != len(pre_gate_images):
+            logger.info(f"最终Gate未全部通过（{len(images)}/{len(pre_gate_images)}），整组图片不展示")
+            images = []
 
         logger.info(f"图片生成流程完成！共生成 {len(images)} 张图片")
 

@@ -82,18 +82,18 @@ class HeadMatcher2D(HeadMatcher):
                 if log_callback:
                     log_callback(log_msg)
                 
-                # 获取文本嵌入
+                # 获取文本嵌入（优先使用“英文检索”短语；失败回退到旧逻辑）
+                requirement_features = self.analyze_user_requirement(requirement)
                 self._ensure_clip_model()
-                expr_text = self._extract_expression_text(requirement)
-                expr_text_safe = self._truncate_clip_text(expr_text)
-                text_emb = self._clip_model_ref.encode([expr_text_safe], convert_to_tensor=False, normalize_embeddings=True)
+                query_text = self._build_clip_query_text(requirement, requirement_features)
+                query_text_safe = self._truncate_clip_text(query_text)
+                text_emb = self._clip_model_ref.encode([query_text_safe], convert_to_tensor=False, normalize_embeddings=True)
                 
                 # 使用缓存搜索
                 results = cache.search(text_emb[0], folder_path, top_k=top_k)
                 
                 if results:
                     # 补充完整信息
-                    requirement_features = self.analyze_user_requirement(requirement)
                     for r in results:
                         r['requirement_features'] = requirement_features
                         r['dimension_scores'] = {dim: r['score'] for dim in self.dimensions}

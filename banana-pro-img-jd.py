@@ -4,9 +4,11 @@ import base64
 import time
 import os
 import threading
+import shutil
 from pathlib import Path
 # 导入2D/3D统一接口
 from prompt_templates_2d import get_system_prompt, get_accessory_instruction, get_constraints
+from utils.limits import limit_image
 
 # 尝试导入带重试机制的http_client
 try:
@@ -30,8 +32,8 @@ PROMPT_TEXT = (
     "严格保持图片1中角色的动作、表情一致性，进行品牌风格优化"
 )
 
-_JD_IMG_SERIALIZE = str(os.environ.get("JD_IMG_SERIALIZE", "1")).strip().lower() in ("1", "true", "yes")
-_JD_IMG_MIN_INTERVAL_S = float(os.environ.get("JD_IMG_MIN_INTERVAL_S", "0.8"))
+_JD_IMG_SERIALIZE = str(os.environ.get("JD_IMG_SERIALIZE", "0")).strip().lower() in ("1", "true", "yes")
+_JD_IMG_MIN_INTERVAL_S = float(os.environ.get("JD_IMG_MIN_INTERVAL_S", "0.0"))
 _JD_IMG_LOCK = threading.Lock()
 _JD_IMG_LAST_AT = 0.0
 
@@ -214,7 +216,7 @@ def generate_image_with_accessories(image_path, accessories_info, style="default
         mode: 模式 ("2d" 或 "3d")，决定使用哪套模板
         
     Returns:
-        str: 生成的图片路径（格式：/output/xxx.png）或原图片路径（跳过时）
+        str | None: 生成的图片路径（格式：/output/xxx.png）；跳过时返回原图片路径；生成失败返回 None
     """
     # 检查是否应该跳过处理
     if _should_skip_processing(accessories_info):
@@ -236,7 +238,7 @@ def generate_image_with_accessories(image_path, accessories_info, style="default
     
     # 执行图片生成
     result_path = _generate_single_image(image_path, prompt)
-    return result_path if result_path else image_path
+    return result_path if result_path else None
 
 def _detect_scene_style(accessories_info: str) -> str:
     """
@@ -271,23 +273,79 @@ def _should_skip_processing(info: str) -> bool:
         return True
     
     lower = text.lower()
-    negative_tokens = [
-        # 中文否定
-        "无", "没有", "不穿", "不换", "不拿", "不持", "不带", "不戴", "原装", "保持原样", "空手",
-        "无服装", "没有服装", "无衣服", "没有衣服", "无手持", "没有手持", "无帽子", "没有帽子",
-        "无头戴", "没有头戴", "无配件", "没有配件", "无物品", "没有物品",
-        # 英文否定
+    strong_skip_phrases = [
+        "保持原样", "原装", "不换", "不变", "不做处理",
+        "keep original", "no change", "unchanged",
+    ]
+    for kw in strong_skip_phrases:
+        if kw in text or kw in lower:
+            print(f"[banana-pro-img-jd] skip_processing: matched strong phrase {kw!r}")
+            return True
+
+    def _normalize_token(s: str) -> str:
+        return str(s).strip().strip(" \t\r\n,，.。;；:：!！?？\"'“”‘’()（）[]【】{}<>《》")
+
+    def _is_negative_value(v: str) -> bool:
+        t = _normalize_token(v)
+        if not t:
+            return True
+        tl = t.lower()
+        if tl in {"none", "null", "undefined"}:
+            return True
+        if t in {"无", "没有", "无需", "不需要", "不穿", "不拿", "不持", "不带", "不戴", "空手"}:
+            return True
+        if t in {
+            "无服装", "没有服装", "无衣服", "没有衣服",
+            "无手持", "没有手持", "无手拿", "没有手拿",
+            "无帽子", "没有帽子", "无头戴", "没有头戴",
+            "无配件", "没有配件", "无物品", "没有物品",
+        }:
+            return True
+        if "no clothes" in tl or "without clothes" in tl or "no clothing" in tl or "without clothing" in tl:
+            return True
+        if "no holding" in tl or "without holding" in tl or "empty hands" in tl:
+            return True
+        if "no hat" in tl or "without hat" in tl or "no headwear" in tl or "without headwear" in tl:
+            return True
+        return False
+
+    try:
+        parsed = _parse_accessories_info(text)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict):
+        candidates = []
+        for k in ("服装", "手拿", "头戴"):
+            v = parsed.get(k)
+            if isinstance(v, str) and v.strip():
+                candidates.append(v)
+        others = parsed.get("其他")
+        if isinstance(others, list):
+            candidates.extend([x for x in others if isinstance(x, str) and x.strip()])
+
+        has_positive = any(not _is_negative_value(v) for v in candidates)
+        if has_positive:
+            return False
+
+        if candidates:
+            print("[banana-pro-img-jd] skip_processing: no positive accessory after parsing")
+            return True
+
+    fallback_negative_tokens = [
+        "没有", "不穿", "不拿", "不持", "不带", "不戴", "空手",
+        "无服装", "没有服装", "无衣服", "没有衣服", "无手持", "没有手持",
+        "无帽子", "没有帽子", "无头戴", "没有头戴", "无配件", "没有配件", "无物品", "没有物品",
         "no clothes", "without clothes", "no clothing", "without clothing",
         "no hands", "without hands", "no holding", "without holding", "empty hands",
         "no hat", "without hat", "no headwear", "without headwear",
-        "original clothes", "keep original", "no change", "unchanged",
         "none", "null", "undefined",
     ]
-    
-    for kw in negative_tokens:
+    for kw in fallback_negative_tokens:
         if kw in text or kw in lower:
             print(f"[banana-pro-img-jd] skip_processing: matched negative token {kw!r}")
             return True
+
     return False
 
 def _build_comprehensive_prompt(accessories_info: str, style="default", scene_style=None, mode="3d") -> str:
@@ -405,6 +463,29 @@ def _generate_single_image(image_path: str, prompt: str) -> str:
     生成单张图片的核心逻辑
     支持429错误重试
     """
+    offline = str(os.environ.get("OFFLINE_MODE", "0")).strip().lower() in ("1", "true", "yes")
+    if offline:
+        try:
+            ms = int(str(os.environ.get("OFFLINE_IMAGE_LATENCY_MS", "")).strip() or "0")
+        except Exception:
+            ms = 0
+        if ms > 0:
+            time.sleep(ms / 1000.0)
+        try:
+            if not image_path or not os.path.exists(image_path):
+                return None
+            OUTPUT_DIR.mkdir(exist_ok=True)
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            microsec = datetime.now().microsecond // 1000
+            rand_suffix = int(time.time() * 1000) % 1000
+            out_path = OUTPUT_DIR / f"offline_generated_{ts}_{microsec:03d}_{rand_suffix}.png"
+            shutil.copyfile(image_path, str(out_path))
+            return f"/output/{out_path.name}"
+        except Exception as e:
+            print(f"[banana-pro-img-jd] OFFLINE_MODE=1 生成模拟失败: {e}")
+            return None
+
     payload = build_payload_one_image(prompt, image_path)
     if payload is None:
         print("构建请求失败：请检查本地图片路径是否正确，以及文件是否可读。")
@@ -417,13 +498,16 @@ def _generate_single_image(image_path: str, prompt: str) -> str:
         "Trace-Id": "banana-pro-img-jd-unified",
     }
 
-    max_retries = 4
-    retry_delay = 5
+    max_retries = int(os.environ.get("LLM_IMAGE_MAX_RETRIES", "2"))
+    retry_delay = float(os.environ.get("LLM_IMAGE_RETRY_DELAY_S", "2.0"))
+    request_timeout = int(os.environ.get("LLM_IMAGE_TIMEOUT_S", "60"))
+    connect_timeout = int(os.environ.get("HTTP_CONNECT_TIMEOUT_S", "10"))
+    timeout = (connect_timeout, request_timeout)
 
     for attempt in range(max_retries):
         try:
             print(f"发送请求...{f' (重试 {attempt})' if attempt > 0 else ''}")
-            
+
             if _JD_IMG_SERIALIZE:
                 global _JD_IMG_LAST_AT
                 with _JD_IMG_LOCK:
@@ -434,14 +518,16 @@ def _generate_single_image(image_path: str, prompt: str) -> str:
                     _JD_IMG_LAST_AT = time.monotonic()
 
                     if USE_HTTP_CLIENT:
-                        response = http_post(URL, json=payload, headers=headers, timeout=90)  # 90秒超时
+                        response = http_post(URL, json=payload, headers=headers, timeout=timeout, use_retry=False)
                     else:
-                        response = requests.post(URL, headers=headers, json=payload, timeout=90)  # 90秒超时
+                        response = requests.post(URL, headers=headers, json=payload, timeout=timeout)
             else:
-                if USE_HTTP_CLIENT:
-                    response = http_post(URL, json=payload, headers=headers, timeout=90)  # 90秒超时
-                else:
-                    response = requests.post(URL, headers=headers, json=payload, timeout=90)  # 90秒超时
+                # 全局外部生图并发/速率控制（避免高并发下触发超时/429雪崩）
+                with limit_image():
+                    if USE_HTTP_CLIENT:
+                        response = http_post(URL, json=payload, headers=headers, timeout=timeout, use_retry=False)
+                    else:
+                        response = requests.post(URL, headers=headers, json=payload, timeout=timeout)
             
             print("HTTP", response.status_code)
 

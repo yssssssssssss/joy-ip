@@ -9,6 +9,7 @@ CLIP 模型全局管理器
 import threading
 import logging
 import os
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,68 @@ _GLOBAL_CLIP_TOKENIZER = None
 _CLIP_LOCK = threading.Lock()
 _PRELOAD_THREAD = None
 _PRELOAD_COMPLETE = threading.Event()
+
+
+def _offline_mode_enabled() -> bool:
+    return str(os.environ.get("OFFLINE_MODE", "0")).strip().lower() in ("1", "true", "yes")
+
+
+class _DummyClipModel:
+    """离线模式下的占位 CLIP 模型（不依赖外网下载）"""
+
+    def __init__(self, dim: int = 512):
+        self.dim = int(dim)
+        self.max_seq_length = 77
+
+    def encode(self, sentences, convert_to_tensor: bool = False, normalize_embeddings: bool = False, **kwargs):
+        import torch
+
+        if sentences is None:
+            items = []
+        elif isinstance(sentences, (str, bytes)):
+            items = [sentences]
+        else:
+            try:
+                items = list(sentences)
+            except Exception:
+                items = [sentences]
+
+        vectors = []
+        for item in items:
+            try:
+                if isinstance(item, str):
+                    key = f"text:{item}"
+                elif hasattr(item, "size") and hasattr(item, "getpixel"):
+                    w, h = item.size
+                    try:
+                        p1 = item.getpixel((0, 0)) if w and h else 0
+                        p2 = item.getpixel((max(0, w - 1), max(0, h - 1))) if w and h else 0
+                    except Exception:
+                        p1 = 0
+                        p2 = 0
+                    key = f"img:{w}x{h}:{p1}:{p2}"
+                else:
+                    key = f"obj:{type(item).__name__}"
+            except Exception:
+                key = "obj"
+
+            h = hashlib.md5(str(key).encode("utf-8", errors="ignore")).digest()
+            seed = int.from_bytes(h[:4], "little", signed=False)
+            g = torch.Generator()
+            g.manual_seed(seed)
+            v = torch.randn(self.dim, generator=g)
+            if normalize_embeddings:
+                n = torch.norm(v)
+                if n > 0:
+                    v = v / n
+            vectors.append(v)
+
+        if vectors:
+            out = torch.stack(vectors, dim=0)
+        else:
+            out = torch.empty((0, self.dim))
+
+        return out if convert_to_tensor else out.cpu().numpy()
 
 
 def get_clip_model():
@@ -41,6 +104,9 @@ def get_clip_model():
                     if os.path.exists(local_model_path):
                         logger.info(f"使用本地 CLIP 模型: {local_model_path}")
                         _GLOBAL_CLIP_MODEL = SentenceTransformer(local_model_path)
+                    elif _offline_mode_enabled():
+                        logger.warning("OFFLINE_MODE=1 且未找到本地 CLIP 模型，改用 DummyClipModel")
+                        _GLOBAL_CLIP_MODEL = _DummyClipModel()
                     else:
                         # 尝试从 HuggingFace 下载（可能失败）
                         logger.info("本地模型不存在，尝试从 HuggingFace 下载...")
@@ -83,17 +149,23 @@ def get_clip_tokenizer():
                     except Exception:
                         from transformers import CLIPTokenizer as CLIPTokenizerClass
                     
-                    # 优先使用本地模型路径
                     local_tokenizer_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'clip-vit-base-patch32')
                     
                     if os.path.exists(local_tokenizer_path):
                         logger.info(f"使用本地 CLIP 分词器: {local_tokenizer_path}")
                         _GLOBAL_CLIP_TOKENIZER = CLIPTokenizerClass.from_pretrained(local_tokenizer_path)
+                    elif _offline_mode_enabled():
+                        logger.warning("OFFLINE_MODE=1 且未找到本地 CLIP 分词器，跳过加载（返回 None）")
+                        _GLOBAL_CLIP_TOKENIZER = None
                     else:
                         logger.info("本地分词器不存在，尝试从 HuggingFace 下载...")
-                        _GLOBAL_CLIP_TOKENIZER = CLIPTokenizerClass.from_pretrained(
-                            'openai/clip-vit-base-patch32'
-                        )
+                        _GLOBAL_CLIP_TOKENIZER = CLIPTokenizerClass.from_pretrained('openai/clip-vit-base-patch32')
+                        try:
+                            os.makedirs(local_tokenizer_path, exist_ok=True)
+                            _GLOBAL_CLIP_TOKENIZER.save_pretrained(local_tokenizer_path)
+                            logger.info(f"已保存 CLIP 分词器到本地: {local_tokenizer_path}")
+                        except Exception as save_error:
+                            logger.warning(f"保存 CLIP 分词器到本地失败: {save_error}")
                     logger.info("✅ 全局 CLIP 分词器加载完成")
                 except Exception as e:
                     logger.warning(f"CLIP 分词器加载失败: {e}")

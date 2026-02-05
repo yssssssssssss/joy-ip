@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-
-import logging
-
-logger = logging.getLogger(__name__)
 基础匹配器类
 提供通用的匹配功能
 """
 
+import logging
 import os
 import sys
 import pandas as pd
@@ -16,10 +13,13 @@ import re
 from typing import Dict, List
 import base64
 
+logger = logging.getLogger(__name__)
+
 # 确保能导入项目根目录的 config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import get_config
 from utils.http_client import http_post, parse_ai_response
+from utils.limits import limit_text
 
 
 class BaseMatcher:
@@ -35,32 +35,76 @@ class BaseMatcher:
         
         self.df = pd.DataFrame()
     
-    def _call_ai(self, system_prompt: str, user_prompt: str, temperature: float = 0.3, max_tokens: int = 500) -> str:
+    def _call_ai(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.3,
+        max_tokens: int = 500,
+        response_mime_type: str | None = None,
+    ) -> str:
         """
         统一的AI调用方法，使用共享 HTTP Session
         """
         try:
-            merged_text = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt
-            payload = {
-                "model": self.model,
-                "contents": [
-                    {
-                        "role": "user",
-                        "parts": [
-                            {"text": merged_text}
-                        ]
-                    }
-                ],
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "stream": False
-            }
+            # JDCloud /v1/responses（Gemini 风格）使用 generationConfig.* 字段；
+            # 旧的顶层 temperature/max_tokens 会触发 400 Unknown name。
+            api_url_lower = (self.api_url or "").lower()
+            is_responses_api = "/v1/responses" in api_url_lower or api_url_lower.rstrip("/").endswith("/responses")
+
+            if is_responses_api:
+                generation_config: dict = {
+                    "temperature": float(temperature),
+                    "maxOutputTokens": int(max_tokens),
+                }
+                if response_mime_type:
+                    generation_config["responseMimeType"] = str(response_mime_type)
+
+                # Gemini-3-Flash-Preview 默认会消耗大量 thoughts token，导致输出被 MAX_TOKENS 截断。
+                # 设置较小的 thinkingBudget 可以显著提升“按格式输出”的稳定性与成本可控性。
+                try:
+                    thinking_budget = int(str(os.environ.get("LLM_THINKING_BUDGET", "32")).strip() or "32")
+                except Exception:
+                    thinking_budget = 32
+                if thinking_budget > 0:
+                    generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+
+                payload = {
+                    "model": self.model,
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": user_prompt}],
+                        }
+                    ],
+                    "generationConfig": generation_config,
+                }
+                if system_prompt:
+                    # Gemini 风格：使用 systemInstruction（比“拼接到 user_prompt”更稳定）
+                    payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+            else:
+                # OpenAI compatible chat/completions fallback
+                messages = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                messages.append({"role": "user", "content": user_prompt})
+                payload = {
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": float(temperature),
+                    "max_tokens": int(max_tokens),
+                    "stream": False,
+                }
             headers = {
                 "Authorization": f"Bearer {self.api_token}",
                 "Content-Type": "application/json"
             }
             
-            resp = http_post(self.api_url, json=payload, headers=headers, timeout=90)  # 90秒超时
+            request_timeout = int(os.environ.get("LLM_TEXT_TIMEOUT_S", "60"))
+            connect_timeout = int(os.environ.get("HTTP_CONNECT_TIMEOUT_S", "10"))
+            timeout = (connect_timeout, request_timeout)
+            with limit_text():
+                resp = http_post(self.api_url, json=payload, headers=headers, timeout=timeout)  # 文本调用超时可配
             resp.raise_for_status()
             data = resp.json()
             

@@ -22,6 +22,7 @@ from utils.banned_words import (
 )
 # 导入分析结果缓存
 from utils.analysis_cache import analysis_cache
+from utils.limits import limit_text
 
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ class ContentAgent:
         # 添加logger作为实例属性，确保子类也能访问
         self.logger = logger
 
-    def _call_llm_text(self, model: str, system_text: str, user_text: str) -> str:
+    def _call_llm_text(self, model: str, system_text: str, user_text: str, timeout_s: int | None = None) -> str:
         trace_id = str(uuid.uuid4())
         headers = {
             "Content-Type": "application/json",
@@ -85,7 +86,11 @@ class ContentAgent:
                 }
             ]
         }
-        resp = http_post(self.api_url, json=payload, headers=headers, timeout=90)
+        request_timeout = int(timeout_s) if isinstance(timeout_s, int) and timeout_s > 0 else int(os.environ.get("LLM_TEXT_TIMEOUT_S", "60"))
+        connect_timeout = int(os.environ.get("HTTP_CONNECT_TIMEOUT_S", "10"))
+        timeout = (connect_timeout, request_timeout)
+        with limit_text():
+            resp = http_post(self.api_url, json=payload, headers=headers, timeout=timeout)
         resp.raise_for_status()
         return parse_ai_response(resp.json())
     
@@ -162,6 +167,14 @@ class ContentAgent:
         is_compliant, reason = self._check_external_banned_words(content)
         if not is_compliant:
             return False, f"违规词检测：{reason}"
+
+        # 优先复用合并分析缓存：命中代表此前已通过合规检查
+        try:
+            cached_analysis = analysis_cache.get(content)
+            if cached_analysis:
+                return True, ""
+        except Exception:
+            pass
         
         # 第二层：AI敏感内容检查
         is_compliant, reason = self._check_sensitive_content_with_ai(content)

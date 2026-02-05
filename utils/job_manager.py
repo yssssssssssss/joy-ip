@@ -5,6 +5,7 @@
 管理后台生成任务的生命周期，支持排队和并发控制
 """
 
+import os
 import threading
 import time
 import uuid
@@ -31,9 +32,11 @@ class Job:
     """任务数据类"""
     job_id: str
     requirement: str
+    queue: str = "generate"  # 队列类型：generate / analyze（可扩展）
     status: JobStatus = JobStatus.QUEUED
     progress: int = 0
     stage: str = "queued"
+    stage_timings: Dict[str, Dict] = field(default_factory=dict)  # 各阶段耗时（用于性能分析）
     analysis: Optional[Dict] = None
     pre_analysis: Optional[Dict] = None  # 用户确认的预分析结果
     mode: str = "3D"  # 生成模式：2D 或 3D
@@ -54,9 +57,11 @@ class Job:
         latest_log = self.logs[-1] if self.logs else None
         return {
             "job_id": self.job_id,
+            "queue": self.queue,
             "status": self.status.value,
             "progress": self.progress,
             "stage": self.stage,
+            "stage_timings": self.stage_timings,
             "analysis": self.analysis,
             "pre_analysis": self.pre_analysis,
             "mode": self.mode,
@@ -106,6 +111,18 @@ class JobQueue:
         
         logger.info(f"JobQueue 初始化: max_concurrent={max_concurrent}, max_queue={max_queue_size}")
 
+    def _duration_percentile(self, percentile: float) -> float:
+        """获取执行时间分位数（秒）"""
+        if not self._duration_history:
+            return self._avg_job_duration
+        values = sorted(self._duration_history)
+        if len(values) == 1:
+            return values[0]
+        percentile = min(1.0, max(0.0, float(percentile)))
+        idx = int(round((len(values) - 1) * percentile))
+        idx = min(len(values) - 1, max(0, idx))
+        return values[idx]
+
     @property
     def avg_job_duration(self) -> float:
         """获取平均任务执行时间"""
@@ -127,7 +144,10 @@ class JobQueue:
                 "running_count": len(self._running_jobs),
                 "waiting_count": len(self._waiting_queue),
                 "max_concurrent": self.max_concurrent,
-                "avg_duration": round(self.avg_job_duration, 1)
+                "avg_duration": round(self.avg_job_duration, 1),
+                "p50_duration": round(self._duration_percentile(0.50), 1),
+                "p95_duration": round(self._duration_percentile(0.95), 1),
+                "queue_max_size": self.max_queue_size,
             }
 
     def get_position_and_wait(self, job_id: str) -> tuple:
@@ -198,7 +218,19 @@ class JobQueue:
     def _start_job(self, job: Job):
         """启动任务执行（需要在锁内调用）"""
         job.status = JobStatus.RUNNING
+        # 记录排队耗时（queued -> starting）
+        try:
+            queued_entry = job.stage_timings.setdefault("queued", {})
+            if "start" not in queued_entry:
+                queued_entry["start"] = job.created_at
+            if "end" not in queued_entry:
+                queued_entry["end"] = time.time()
+                queued_entry["ms"] = int((queued_entry["end"] - queued_entry["start"]) * 1000)
+        except Exception:
+            pass
+
         job.stage = "starting"
+        job.stage_timings.setdefault("starting", {}).setdefault("start", time.time())
         job.queue_position = 0
         job.estimated_wait = 0
         job.started_at = time.time()
@@ -236,6 +268,15 @@ class JobQueue:
             if job_id in self._running_jobs:
                 job = self._running_jobs.pop(job_id)
                 job.finished_at = time.time()
+                stage = job.stage or ""
+                if stage:
+                    entry = job.stage_timings.setdefault(stage, {})
+                    if "start" in entry and "end" not in entry:
+                        entry["end"] = time.time()
+                        try:
+                            entry["ms"] = int((entry["end"] - entry["start"]) * 1000)
+                        except Exception:
+                            pass
             
             # 清理处理函数
             self._job_handlers.pop(job_id, None)
@@ -311,6 +352,11 @@ class JobManager:
             max_concurrent=max_concurrent,
             max_queue_size=max_queue_size
         )
+        # 支持多队列（为兼容旧逻辑，默认 analyze 与 generate 共用一套队列）
+        self._queues: Dict[str, JobQueue] = {
+            "generate": self._queue,
+            "analyze": self._queue,
+        }
 
         # 启动清理线程
         self._cleanup_thread = threading.Thread(
@@ -322,7 +368,7 @@ class JobManager:
 
         logger.info(f"JobManager 初始化完成: max_jobs={max_jobs}, ttl={job_ttl}s, max_concurrent={max_concurrent}")
 
-    def create_job(self, requirement: str) -> str:
+    def create_job(self, requirement: str, queue: str = "generate") -> str:
         """创建新任务（仅创建，不启动）"""
         job_id = uuid.uuid4().hex
 
@@ -330,13 +376,18 @@ class JobManager:
             if len(self._jobs) >= self._max_jobs:
                 self._cleanup_old_jobs()
 
-            job = Job(job_id=job_id, requirement=requirement)
+            job = Job(job_id=job_id, requirement=requirement, queue=str(queue or "generate"))
+            try:
+                job.stage = "queued"
+                job.stage_timings.setdefault("queued", {}).setdefault("start", job.created_at)
+            except Exception:
+                pass
             self._jobs[job_id] = job
 
         logger.info(f"创建任务: {job_id}")
         return job_id
 
-    def submit_job(self, job_id: str, handler: Callable) -> Dict:
+    def submit_job(self, job_id: str, handler: Callable, queue: str | None = None) -> Dict:
         """
         提交任务到执行队列
         
@@ -348,11 +399,17 @@ class JobManager:
             if not job:
                 return {"success": False, "error": "任务不存在"}
 
-        success = self._queue.submit(job, handler)
-        if not success:
-            return {"success": False, "error": "队列已满，请稍后重试"}
+        queue_name = str(queue or job.queue or "generate")
+        q = self._queues.get(queue_name)
+        if q is None:
+            return {"success": False, "error": f"未知队列: {queue_name}"}
 
-        position, wait_time = self._queue.get_position_and_wait(job_id)
+        job.queue = queue_name
+        success = q.submit(job, handler)
+        if not success:
+            return {"success": False, "error": "队列已满，请稍后重试", "code": "QUEUE_FULL"}
+
+        position, wait_time = q.get_position_and_wait(job_id)
         return {
             "success": True,
             "queue_position": position,
@@ -371,21 +428,43 @@ class JobManager:
             return None
         
         # 更新队列位置信息
-        position, wait_time = self._queue.get_position_and_wait(job_id)
+        q = self._queues.get(str(job.queue or "generate")) or self._queue
+        position, wait_time = q.get_position_and_wait(job_id)
         job.queue_position = position
         job.estimated_wait = wait_time
         
         return job.to_dict()
 
     def get_queue_stats(self) -> Dict:
-        """获取队列统计信息"""
+        """获取生成队列统计信息（保持兼容：默认返回 generate 队列）"""
         return self._queue.get_queue_stats()
+
+    def get_all_queue_stats(self) -> Dict[str, Dict]:
+        """获取所有队列的统计信息"""
+        return {name: q.get_queue_stats() for name, q in self._queues.items()}
 
     def update_job(self, job_id: str, **kwargs):
         """更新任务"""
         with self._jobs_lock:
             job = self._jobs.get(job_id)
             if job:
+                # 阶段切换自动记录耗时，避免在业务层到处打点
+                if "stage" in kwargs and isinstance(kwargs.get("stage"), str):
+                    new_stage = kwargs.get("stage") or ""
+                    old_stage = job.stage or ""
+                    if new_stage and new_stage != old_stage:
+                        now = time.time()
+                        if old_stage:
+                            old_entry = job.stage_timings.setdefault(old_stage, {})
+                            if "start" in old_entry and "end" not in old_entry:
+                                old_entry["end"] = now
+                                try:
+                                    old_entry["ms"] = int((old_entry["end"] - old_entry["start"]) * 1000)
+                                except Exception:
+                                    pass
+                        new_entry = job.stage_timings.setdefault(new_stage, {})
+                        new_entry.setdefault("start", now)
+
                 for key, value in kwargs.items():
                     if key == 'status':
                         if isinstance(value, str):
@@ -427,7 +506,9 @@ class JobManager:
 
     def cancel_job(self, job_id: str) -> bool:
         """取消排队中的任务"""
-        success = self._queue.cancel_job(job_id)
+        job = self.get_job(job_id)
+        q = self._queues.get(str(getattr(job, "queue", "") or "generate")) or self._queue
+        success = q.cancel_job(job_id)
         if success:
             self.update_job(job_id, status=JobStatus.CANCELLED)
         return success
@@ -455,5 +536,22 @@ class JobManager:
                 self._cleanup_old_jobs()
 
 
-# 全局任务管理器（并发限制5个）
-job_manager = JobManager(max_concurrent=5, max_queue_size=50)
+def _env_int(name: str, default: int, min_value: int = 1, max_value: int = None) -> int:
+    raw = os.environ.get(name)
+    try:
+        value = int(str(raw).strip()) if raw is not None and str(raw).strip() else int(default)
+    except Exception:
+        value = int(default)
+    if max_value is not None:
+        value = min(int(max_value), value)
+    return max(int(min_value), value)
+
+
+# 全局任务管理器（支持环境变量配置）
+job_manager = JobManager(
+    max_jobs=_env_int("JOB_MAX_JOBS", 100, min_value=10),
+    job_ttl=_env_int("JOB_TTL_SECONDS", 3600, min_value=60),
+    cleanup_interval=_env_int("JOB_CLEANUP_INTERVAL_SECONDS", 300, min_value=30),
+    max_concurrent=_env_int("JOB_MAX_CONCURRENT", 5, min_value=1),
+    max_queue_size=_env_int("JOB_MAX_QUEUE_SIZE", 50, min_value=10),
+)
