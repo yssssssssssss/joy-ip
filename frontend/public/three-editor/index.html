@@ -8,31 +8,6 @@
   </head>
   <body>
     <div class="container">
-      <div class="toolbar">
-        <h1>JOY 3D 编辑器</h1>
-        <div class="toolbar-actions">
-          <input id="upload-model" type="file" accept=".glb,.gltf,.fbx" class="btn btn-outline" />
-          <button id="screenshot-btn" class="btn btn-secondary">截屏</button>
-          <button id="render-btn" class="btn btn-primary">高清渲染</button>
-        </div>
-      </div>
-
-      <!-- 预审模型相片墙 + 灯光控制：并排布局 -->
-      <div class="approved-row">
-        <div id="approved-grid" class="approved-grid" aria-label="预审模型相片墙">
-          <!-- 由 main.js 动态填充 -->
-        </div>
-        <div class="panel-section light-control">
-          <h3>灯光对比</h3>
-          <div class="light-buttons">
-            <button id="contrast-strong" class="btn btn-light-control btn-primary">强对比</button>
-            <button id="contrast-normal" class="btn btn-light-control btn-secondary">常规</button>
-            <button id="contrast-weak" class="btn btn-light-control btn-outline">弱对比</button>
-          </div>
-          <div class="hint">环境光：20%/50%/80%</div>
-        </div>
-      </div>
-
       <div class="main-content">
         <div class="render-area">
           <canvas id="canvas"></canvas>

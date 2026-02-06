@@ -28,7 +28,7 @@ export default function ThreeEditorModal({
   renderPreviewUrl,
   isLoading,
 }: ThreeEditorModalProps) {
-  const [selectedLight, setSelectedLight] = useState<string>('强对比')
+  const [selectedLight, setSelectedLight] = useState<string>('弱对比')
   const [approvedModels, setApprovedModels] = useState<ApprovedModel[]>([])
   const [isLoadingApprovedModels, setIsLoadingApprovedModels] = useState(false)
   const threeEditorIframeRef = useRef<HTMLIFrameElement | null>(null)
@@ -58,6 +58,25 @@ export default function ThreeEditorModal({
       }
     })()
   }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const handleLoad = () => {
+      const win = threeEditorIframeRef.current?.contentWindow
+      if (!win) return
+      const level = selectedLight === '强对比' ? 'strong' : selectedLight === '常规' ? 'normal' : 'weak'
+      win.postMessage({ type: 'three-editor-set-contrast', level }, '*')
+    }
+    const iframe = threeEditorIframeRef.current
+    if (iframe) {
+      iframe.addEventListener('load', handleLoad)
+      // 如果 iframe 已经加载完成，手动调用一次
+      if (iframe.contentDocument?.readyState === 'complete') {
+        handleLoad()
+      }
+    }
+    return () => iframe?.removeEventListener('load', handleLoad)
+  }, [open, selectedLight])
 
   if (!open) return null
 
@@ -179,6 +198,13 @@ export default function ThreeEditorModal({
                 {isLoading ? '渲染中...' : '渲染'}
               </button>
               <button
+                onClick={() => {
+                  if (!renderPreviewUrl) return
+                  const a = document.createElement('a')
+                  a.href = renderPreviewUrl
+                  a.download = `joy-3d-render-${Date.now()}.png`
+                  a.click()
+                }}
                 className={`flex-1 h-[72px] rounded-[24px] font-bold text-xl transition-all flex items-center justify-center gap-3 ${
                   renderPreviewUrl
                   ? 'bg-gradient-to-r from-[#b7affe] to-[#a6ccfd] text-[#16171d] shadow-[0_10px_30px_rgba(183,175,254,0.3)] hover:scale-[1.02] active:scale-[0.98]'

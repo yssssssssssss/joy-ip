@@ -261,46 +261,7 @@ window.addEventListener('message', (event) => {
 });
 
 async function initApprovedGrid() {
-  const grid = document.getElementById('approved-grid');
-  if (!grid) return;
-  try {
-    const resp = await fetch('/three-editor/approved-models.json', { cache: 'no-store' });
-    const list = await resp.json();
-    grid.innerHTML = '';
-    list.forEach((item, index) => {
-      const card = document.createElement('div');
-      card.className = 'approved-item';
-      if (item.name) card.title = item.name;
-
-      const img = document.createElement('img');
-      img.loading = 'lazy'; // 懒加载优化
-      img.decoding = 'async';
-      img.src = item.preview;
-      img.alt = item.name || '预审模型';
-      img.className = 'model-thumb';
-
-      const label = document.createElement('div');
-      label.textContent = item.name || '';
-      label.className = 'model-label';
-
-      card.appendChild(img);
-      card.appendChild(label);
-
-      card.addEventListener('click', () => {
-        // 显示加载状态
-        if (loadingEl) loadingEl.style.display = 'flex';
-        loadGLTFUrl(item.url);
-      });
-      grid.appendChild(card);
-      
-      // 首个模型自动加载
-      if (index === 0) {
-        setTimeout(() => loadGLTFUrl(item.url), 100);
-      }
-    });
-  } catch (e) {
-    console.warn('无法加载预审模型列表:', e);
-  }
+  // 已改由父组件 React 加载和展示
 }
 
 async function renderHighQuality(options = {}) {
@@ -400,106 +361,7 @@ async function renderHighQuality(options = {}) {
 }
 
 function setupUI() {
-  document.getElementById('screenshot-btn').addEventListener('click', takeScreenshot);
-  document.getElementById('render-btn').addEventListener('click', () => {
-    openRenderModal();
-  });
-  document.getElementById('start-render-btn').addEventListener('click', () => {
-    // 保持弹窗打开；仅开始渲染，不关闭设置
-    const format = document.getElementById('render-format').value;
-    const quality = parseFloat(document.getElementById('jpeg-quality').value);
-    const supersample = parseInt(document.getElementById('supersample').value || '1', 10);
-    const lensMMVal = parseInt(document.getElementById('lens-mm')?.value || '0', 10);
-    const keepRatio = !!document.getElementById('keep-aspect-ratio')?.checked;
-    let width = parseInt(document.getElementById('render-width').value || '1920', 10);
-    let height = parseInt(document.getElementById('render-height').value || '1080', 10);
-    if (keepRatio) {
-      syncAspectFromView();
-      height = Math.max(1, Math.round(width / currentAspect));
-      document.getElementById('render-height').value = String(height);
-    }
-    renderHighQuality({ width, height, format, quality, supersample, lensMM: lensMMVal });
-  });
-
-  document.getElementById('upload-model').addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    if (file.name.toLowerCase().endsWith('.glb') || file.name.toLowerCase().endsWith('.gltf')) {
-      loadGLTF(file);
-    } else if (file.name.toLowerCase().endsWith('.fbx')) {
-      loadFBX(file);
-    } else {
-      alert('只支持 GLTF/GLB 或 FBX 文件');
-    }
-  });
-
-  // 灯光设置事件绑定
-  const ambInt = document.getElementById('ambient-intensity');
-  const ambCol = document.getElementById('ambient-color');
-  const dirInt = document.getElementById('dir-intensity');
-  const dirCol = document.getElementById('dir-color');
-  const dirX = document.getElementById('dir-x');
-  const dirY = document.getElementById('dir-y');
-  const dirZ = document.getElementById('dir-z');
-  const ptInt = document.getElementById('point-intensity');
-  const ptCol = document.getElementById('point-color');
-  const ptX = document.getElementById('point-x');
-  const ptY = document.getElementById('point-y');
-  const ptZ = document.getElementById('point-z');
-  const addPt = document.getElementById('add-point-light');
-  const spInt = document.getElementById('spot-intensity');
-  const spCol = document.getElementById('spot-color');
-  const spAng = document.getElementById('spot-angle');
-  const spPen = document.getElementById('spot-penumbra');
-
-  // 对比按钮（仅保留三档）
-  const strongBtn = document.getElementById('contrast-strong');
-  const normalBtn = document.getElementById('contrast-normal');
-  const weakBtn = document.getElementById('contrast-weak');
-  if (strongBtn) strongBtn.addEventListener('click', () => setContrastLevel('strong'));
-  if (normalBtn) normalBtn.addEventListener('click', () => setContrastLevel('normal'));
-  if (weakBtn) weakBtn.addEventListener('click', () => setContrastLevel('weak'));
-
-  if (ambInt) ambInt.addEventListener('input', (e) => { ambientLight.intensity = parseFloat(e.target.value) });
-  if (ambCol) ambCol.addEventListener('input', (e) => { ambientLight.color.set(e.target.value) });
-  if (dirInt) dirInt.addEventListener('input', (e) => { dirLight.intensity = parseFloat(e.target.value) });
-  if (dirCol) dirCol.addEventListener('input', (e) => { dirLight.color.set(e.target.value) });
-  const updateDirPos = () => {
-    const x = parseFloat(dirX?.value || '5');
-    const y = parseFloat(dirY?.value || '10');
-    const z = parseFloat(dirZ?.value || '7.5');
-    dirLight.position.set(x, y, z);
-  };
-  if (dirX) dirX.addEventListener('input', updateDirPos);
-  if (dirY) dirY.addEventListener('input', updateDirPos);
-  if (dirZ) dirZ.addEventListener('input', updateDirPos);
-
-  if (ptInt) ptInt.addEventListener('input', (e) => { pointLight.intensity = parseFloat(e.target.value) });
-  if (ptCol) ptCol.addEventListener('input', (e) => { pointLight.color.set(e.target.value) });
-  const updatePtPos = () => {
-    const x = parseFloat(ptX?.value || '-3');
-    const y = parseFloat(ptY?.value || '2');
-    const z = parseFloat(ptZ?.value || '-2');
-    pointLight.position.set(x, y, z);
-  };
-  if (ptX) ptX.addEventListener('input', updatePtPos);
-  if (ptY) ptY.addEventListener('input', updatePtPos);
-  if (ptZ) ptZ.addEventListener('input', updatePtPos);
-  if (addPt) addPt.addEventListener('click', () => {
-    const intensity = parseFloat(ptInt?.value || '0.6');
-    const color = ptCol?.value || '#ffffff';
-    const x = parseFloat(ptX?.value || '0');
-    const y = parseFloat(ptY?.value || '1');
-    const z = parseFloat(ptZ?.value || '0');
-    const newPoint = new THREE.PointLight(color, intensity);
-    newPoint.position.set(x, y, z);
-    scene.add(newPoint);
-  });
-
-  if (spInt) spInt.addEventListener('input', (e) => { spotLight.intensity = parseFloat(e.target.value) });
-  if (spCol) spCol.addEventListener('input', (e) => { spotLight.color.set(e.target.value) });
-  if (spAng) spAng.addEventListener('input', (e) => { spotLight.angle = parseFloat(e.target.value) });
-  if (spPen) spPen.addEventListener('input', (e) => { spotLight.penumbra = parseFloat(e.target.value) });
+  // 基础 UI 元素已在 index.html 中被移除，改由父组件 React 控制
 }
 
 function openRenderModal() {
