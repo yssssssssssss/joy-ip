@@ -222,6 +222,44 @@ function loadGLTFUrl(url) {
   });
 }
 
+function setContrastLevel(level) {
+  if (!ambientLight || !dirLight) return;
+  if (level === 'strong') {
+    ambientLight.intensity = 0.8;
+    dirLight.intensity = 2;
+  } else if (level === 'normal') {
+    ambientLight.intensity = 1.2;
+    dirLight.intensity = 2;
+  } else if (level === 'weak') {
+    ambientLight.intensity = 1.8;
+    dirLight.intensity = 2;
+  }
+}
+
+window.addEventListener('message', (event) => {
+  const data = event?.data;
+  if (!data || typeof data !== 'object') return;
+
+  if (data.type === 'three-editor-load-model') {
+    if (typeof data.url !== 'string') return;
+    const safeUrl = String(data.url).replace(/\\/g, '/').trim();
+    if (!safeUrl || safeUrl.includes('..') || !safeUrl.startsWith('/three-editor/')) return;
+    loadGLTFUrl(safeUrl);
+    return;
+  }
+
+  if (data.type === 'three-editor-set-contrast') {
+    const level = data.level;
+    if (level !== 'strong' && level !== 'normal' && level !== 'weak') return;
+    setContrastLevel(level);
+    return;
+  }
+
+  if (data.type === 'three-editor-hq-render-default') {
+    renderHighQuality({ width: 1024, height: 1200, format: 'png', quality: 0.92, supersample: 2, lensMM: 200 });
+  }
+});
+
 async function initApprovedGrid() {
   const grid = document.getElementById('approved-grid');
   if (!grid) return;
@@ -418,13 +456,9 @@ function setupUI() {
   const strongBtn = document.getElementById('contrast-strong');
   const normalBtn = document.getElementById('contrast-normal');
   const weakBtn = document.getElementById('contrast-weak');
-  const applyContrast = (ambient, directional) => {
-    if (ambientLight) ambientLight.intensity = ambient;
-    if (dirLight) dirLight.intensity = directional;
-  };
-  if (strongBtn) strongBtn.addEventListener('click', () => applyContrast(0.8, 2));
-  if (normalBtn) normalBtn.addEventListener('click', () => applyContrast(1.2, 2));
-  if (weakBtn) weakBtn.addEventListener('click', () => applyContrast(1.8, 2));
+  if (strongBtn) strongBtn.addEventListener('click', () => setContrastLevel('strong'));
+  if (normalBtn) normalBtn.addEventListener('click', () => setContrastLevel('normal'));
+  if (weakBtn) weakBtn.addEventListener('click', () => setContrastLevel('weak'));
 
   if (ambInt) ambInt.addEventListener('input', (e) => { ambientLight.intensity = parseFloat(e.target.value) });
   if (ambCol) ambCol.addEventListener('input', (e) => { ambientLight.color.set(e.target.value) });

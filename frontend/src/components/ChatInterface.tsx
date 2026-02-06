@@ -13,6 +13,7 @@ import AnalysisPreview, { AnalysisResult } from './AnalysisPreview'
 import NoticeModal from './NoticeModal'
 import ThreeEditorModal from './ThreeEditorModal'
 import TwoDEditorModal from './TwoDEditorModal'
+import ThreeDAssetEditorModal from './ThreeDAssetEditorModal'
 
 
 // 队列状态类型
@@ -37,7 +38,11 @@ export default function ChatInterface() {
   const [renderFilePath, setRenderFilePath] = React.useState<string | null>(null)
   const [threePrompt, setThreePrompt] = React.useState('')
   const [twoDEditorOpen, setTwoDEditorOpen] = React.useState(false)
+  const [threeDEditorOpen, setThreeDEditorOpen] = React.useState(false)
+  const [twoDPreviewUrl, setTwoDPreviewUrl] = React.useState<string | null>(null)
   const [twoDBaseImageUrl, setTwoDBaseImageUrl] = React.useState<string | null>(null)
+  const [threeDPreviewUrl, setThreeDPreviewUrl] = React.useState<string | null>(null)
+  const [threeDBaseImageUrl, setThreeDBaseImageUrl] = React.useState<string | null>(null)
   // 队列状态
   const [queueInfo, setQueueInfo] = React.useState<QueueInfo | null>(null)
   const [currentJobId, setCurrentJobId] = React.useState<string | null>(null)
@@ -48,6 +53,7 @@ export default function ChatInterface() {
   const [generationMode, setGenerationMode] = React.useState<'2D' | '3D'>('3D')
   const [perspective, setPerspective] = React.useState<string>('正视角')
   const [pendingPrompt, setPendingPrompt] = React.useState<string>('')
+  const [pendingPromptOriginal, setPendingPromptOriginal] = React.useState<string>('')
   const [runningLog, setRunningLog] = React.useState<string>('')
   const [runningLogActive, setRunningLogActive] = React.useState(false)
 
@@ -86,12 +92,9 @@ export default function ChatInterface() {
     const trimmed = nextLog.trim()
     if (!trimmed) return
     if (trimmed === lastLogRef.current) return  // 跳过重复的日志
-    
+
     lastLogRef.current = trimmed
-    
-    const nextLogs = [...runningLogsRef.current, trimmed]
-    runningLogsRef.current = nextLogs.slice(-8)
-    setRunningLog(runningLogsRef.current.join('\n'))
+    setRunningLog(trimmed)
   }
 
   const handleThreeModalOpenChange = (nextOpen: boolean) => {
@@ -250,6 +253,23 @@ export default function ChatInterface() {
     setInput(buildInputFromPresets(next))
   }
 
+  const filterPoseFromPrompt = (text: string) => {
+    let t = String(text || '')
+    t = t.replace(/\[(表情|动作)\]/g, '')
+    t = t.replace(/(表情|动作)\s*[:：]\s*[^，。,.\n]+[，。,.\n]?/g, '')
+    t = t.replace(/(站姿|站立|坐姿|跳跃|跑动|欢快|开心|大笑|微笑|陶醉|眨眼)/g, '')
+    t = t.replace(/[，,]\s*[，,]+/g, '，')
+    t = t.replace(/\s{2,}/g, ' ')
+    t = t.replace(/^[\s，,。.]+|[\s，,。.]+$/g, '')
+    return t.trim()
+  }
+
+  const lockPoseInAnalysis = (analysis: AnalysisResult, mode: '2D' | '3D'): AnalysisResult => {
+    const hasBaseImage = mode === '2D' ? !!twoDBaseImageUrl : !!threeDBaseImageUrl
+    if (!hasBaseImage) return analysis
+    return { ...analysis, 表情: '', 动作: '' }
+  }
+
   const clearChat = () => {
     if (pollTimerRef.current) {
       clearTimeout(pollTimerRef.current)
@@ -272,6 +292,7 @@ export default function ChatInterface() {
     setChatStatus('idle')
     setAnalysisResult(null)
     setPendingPrompt('')
+    setPendingPromptOriginal('')
     setRunningLogActive(false)
     clearRunningLog()
     persistState([], defaultInput, {}, 0)
@@ -336,6 +357,20 @@ export default function ChatInterface() {
         }
       }
 
+      // 3D 底图存在时：忽略表情/动作，仅处理配件/背景
+      if (generationMode === '3D' && threeDBaseImageUrl) {
+        const keywords = ['表情', '动作', '站姿', '站立', '坐姿', '跳跃', '跑动', '欢快', '开心', '[表情]', '[动作]']
+        const needHint = keywords.some(k => text.includes(k))
+        if (needHint) {
+          nextMessages.push({
+            id: `${Date.now()}-3d-base-hint`,
+            type: 'assistant',
+            content: '提示：已使用 3D 底图（拼模/渲染），将忽略表情/动作，仅处理配件/背景',
+            timestamp: new Date()
+          })
+        }
+      }
+
       const updated = [...prev, ...nextMessages]
       persistState(updated, '', selectedPresets)
       return updated
@@ -346,72 +381,28 @@ export default function ChatInterface() {
     clearRunningLog()
     setIsLoading(true)
 
+    const shouldFilterPoseInfo = generationMode === '3D' && !!threeDBaseImageUrl
+    const textForAnalyze = shouldFilterPoseInfo ? filterPoseFromPrompt(text) : text
+
     let requestId = ''
     try {
       requestId =
         globalThis.crypto?.randomUUID?.() ??
         `${Date.now()}-${Math.random().toString(16).slice(2)}`
 
-      if (renderFilePath) {
-        const currentRenderPath = renderFilePath
-        setRenderFilePath(null)
-        setRenderPreviewUrl(null)
-        setThreePrompt('')
 
-        const runRes = await axios.post(
-          '/api/run-3d-banana',
-          { imagePath: currentRenderPath, promptText: text },
-          { timeout: 0, headers: { 'X-Request-ID': requestId } }  // 取消超时限制
-        )
-        if (runRes.data?.success && runRes.data?.url) {
-          const assistantMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            type: 'assistant',
-            content: '已根据渲染图生成结果',
-            images: [runRes.data.url],
-            mode: '3D',
-            timestamp: new Date()
-          }
-          setMessages(prev => {
-            const updated = [...prev, assistantMessage]
-            persistState(updated, input, selectedPresets)
-            return updated
-          })
-        } else {
-          // 检查是否为违规词检查失败
-          const isComplianceError = runRes.data?.code === 'COMPLIANCE' || String(runRes.data?.error || '').includes('不合规')
-          setComplianceError(!!isComplianceError)
-
-          const errorMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            type: 'assistant',
-            content: isComplianceError
-              ? '输入内容不符合规范，请重新描述你的需求'
-              : `生成失败: ${runRes.data?.error || '未知错误'}`,
-            timestamp: new Date()
-          }
-          setMessages(prev => {
-            const updated = [...prev, errorMessage]
-            persistState(updated, input, selectedPresets)
-            return updated
-          })
-        }
-        setIsLoading(false)
-        scheduleRunningLogHide()
-        return
-      }
 
       // 第一步：分析内容（异步轮询，避免网关/反代超时）
       setChatStatus('analyzing')
       const analyzeRes = await axios.post(
         '/api/analyze',
         {
-          requirement: text,
+          requirement: textForAnalyze,
           mode: generationMode,
           perspective: generationMode === '2D' ? perspective : undefined,
           async: true
         },
-        { timeout: 0, headers: { 'X-Request-ID': requestId } }  // timeout: 0 表示无超时限制
+        { timeout: 0, headers: { 'X-Request-ID': requestId, 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' } }  // timeout: 0 表示无超时限制
       )
 
       if (!analyzeRes.data?.success) {
@@ -439,8 +430,9 @@ export default function ChatInterface() {
       // 兼容：如果后端直接返回 analysis（同步模式）
       if (analyzeRes.data?.analysis) {
         const analysis = analyzeRes.data.analysis as AnalysisResult
-        setAnalysisResult(analysis)
-        setPendingPrompt(text)
+        setAnalysisResult(lockPoseInAnalysis(analysis, generationMode))
+        setPendingPrompt(textForAnalyze)
+        setPendingPromptOriginal(text)
         setChatStatus('preview')
         setIsLoading(false)
         return
@@ -454,25 +446,25 @@ export default function ChatInterface() {
       const deadline = Date.now() + 600000  // 10分钟超时
       let retryCount = 0
       const MAX_RETRIES = 400  // 最多重试 400 次（前30秒1秒间隔=30次，后9.5分钟2秒间隔=285次，总计约10分钟）
-      
+
       while (true) {
         retryCount++
-        
+
         // 多重退出条件保护
         if (Date.now() > deadline) {
           console.error('分析超时: 超过时间限制')
           throw new Error('分析超时，请稍后重试')
         }
-        
+
         if (retryCount > MAX_RETRIES) {
           console.error('分析超时: 超过最大重试次数')
           throw new Error('分析超时，请稍后重试')
         }
-        
+
         try {
           const statusRes = await axios.get(`/api/job/${analyzeJobId}/status`, {
             timeout: 0,  // 取消超时限制
-            headers: { 'X-Request-ID': requestId }
+            headers: { 'X-Request-ID': requestId, 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' }
           })
           if (statusRes.data?.success) {
             const job = statusRes.data.job as any
@@ -480,8 +472,9 @@ export default function ChatInterface() {
             if (job?.status === 'succeeded') {
               const analysis = job.analysis as AnalysisResult
               setComplianceError(false)
-              setAnalysisResult(analysis)
-              setPendingPrompt(text)
+              setAnalysisResult(lockPoseInAnalysis(analysis, generationMode))
+              setPendingPrompt(textForAnalyze)
+              setPendingPromptOriginal(text)
               setChatStatus('preview')
               setIsLoading(false)
               return
@@ -559,13 +552,21 @@ export default function ChatInterface() {
 
     try {
       const modeAtStart = generationMode
+      // DEBUG: Log base image URLs before API call
+      console.log('[DEBUG handleConfirmAnalysis] Base image state:', {
+        mode: modeAtStart,
+        twoDBaseImageUrl,
+        threeDBaseImageUrl,
+        will_send_base_url: modeAtStart === '2D' ? twoDBaseImageUrl : (modeAtStart === '3D' ? threeDBaseImageUrl : null)
+      })
       const startRes = await axios.post('/api/start_generate', {
         requirement: pendingPrompt,
-        analysis: analysisResult,  // 传递用户确认/编辑后的分析结果
+        analysis: lockPoseInAnalysis(analysisResult, modeAtStart),  // 传递用户确认/编辑后的分析结果
         mode: modeAtStart,
         perspective: modeAtStart === '2D' ? perspective : undefined,
-        ...(modeAtStart === '2D' && twoDBaseImageUrl ? { base_image_url: twoDBaseImageUrl } : {})
-      }, { timeout: 0 })  // 取消超时限制
+        ...(modeAtStart === '2D' && twoDBaseImageUrl ? { base_image_url: twoDBaseImageUrl } : {}),
+        ...(modeAtStart === '3D' && threeDBaseImageUrl ? { base_image_url: threeDBaseImageUrl } : {})
+      }, { timeout: 0, headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' } })  // 取消超时限制
 
       if (!startRes.data?.success || !startRes.data?.job_id) {
         const needComplianceMsg = startRes.data?.code === 'COMPLIANCE' || String(startRes.data?.error || '').includes('违规')
@@ -596,6 +597,7 @@ export default function ChatInterface() {
       setCurrentJobId(jobId)
       setAnalysisResult(null)
       setPendingPrompt('')
+      setPendingPromptOriginal('')
 
       // 设置初始队列信息
       if (startRes.data.queue_position > 0) {
@@ -760,6 +762,7 @@ export default function ChatInterface() {
     setChatStatus('idle')
     setAnalysisResult(null)
     setPendingPrompt('')
+    setPendingPromptOriginal('')
     setIsLoading(false)
     scheduleRunningLogHide()
   }
@@ -856,21 +859,43 @@ export default function ChatInterface() {
       if (data.type === 'three-editor-hq-render') {
         console.log('[3D Editor] 收到渲染预览', data)
         setRenderPreviewUrl(data.dataURL)
+        setRenderFilePath(null)
+        setThreeDPreviewUrl(null)
+        setThreeDBaseImageUrl(null)
+        setGenerationMode('3D')
       } else if (data.type === 'three-editor-hq-saved') {
         console.log('[3D Editor] 收到保存完成', data)
+        const savedUrl = data.previewUrl || data.url || null
         setRenderFilePath(data.filePath || null)
-        setRenderPreviewUrl(data.previewUrl || data.url || null)
+        setRenderPreviewUrl(savedUrl)
+        setThreeDPreviewUrl(null)
+        setThreeDBaseImageUrl(savedUrl)
+        setGenerationMode('3D')
       }
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
   }, [])
 
-  // 切换视角/2D-3D 模式时，自动清空 2D 底图预览条（并关闭编辑器弹窗）
   useEffect(() => {
+    if (generationMode === '2D') {
+      setRenderPreviewUrl(null)
+      setRenderFilePath(null)
+      setThreeDPreviewUrl(null)
+      setThreeDBaseImageUrl(null)
+      setThreeDEditorOpen(false)
+      return
+    }
+    setTwoDPreviewUrl(null)
     setTwoDBaseImageUrl(null)
     setTwoDEditorOpen(false)
-  }, [generationMode, perspective])
+  }, [generationMode])
+
+  useEffect(() => {
+    setTwoDPreviewUrl(null)
+    setTwoDBaseImageUrl(null)
+    setTwoDEditorOpen(false)
+  }, [perspective])
 
   useEffect(() => {
     const handler = () => {
@@ -885,46 +910,22 @@ export default function ChatInterface() {
     return () => window.removeEventListener('popstate', handler)
   }, [])
 
-  const TwoDBasePreview = () => {
-    if (generationMode !== '2D' || !twoDBaseImageUrl) return null
-    return (
-      <div className="flex items-center justify-center gap-2 py-2 px-4">
-        <span className="text-sm text-gray-300">已选择2D底图：</span>
-        <img
-          src={twoDBaseImageUrl}
-          alt="2D底图预览"
-          className="w-16 h-16 object-cover rounded border border-gray-600 bg-white"
-        />
-        <button
-          className="text-xs text-gray-400 hover:text-white ml-2"
-          onClick={() => setTwoDBaseImageUrl(null)}
-        >
-          清除
-        </button>
-        <button
-          className="text-xs text-gray-400 hover:text-white"
-          onClick={() => setTwoDEditorOpen(true)}
-        >
-          替换
-        </button>
-      </div>
-    )
-  }
-
-  const RenderPreview = () => {
-    if (!renderPreviewUrl || threeModalOpen) return null
-    return (
-      <div className="flex items-center justify-center gap-2 py-2 px-4">
-        <span className="text-sm text-gray-300">已渲染预览：</span>
-        <img src={renderPreviewUrl} alt="渲染预览" className="w-16 h-16 object-cover rounded border border-gray-600" />
-        <button
-          className="text-xs text-gray-400 hover:text-white ml-2"
-          onClick={() => { setRenderPreviewUrl(null); setRenderFilePath(null) }}
-        >
-          清除
-        </button>
-      </div>
-    )
+  const titlePreviewUrl = generationMode === '2D' ? twoDPreviewUrl : renderPreviewUrl
+  const inputPreviewUrl = generationMode === '3D' ? threeDPreviewUrl : null
+  const clearTitlePreview = () => {
+    if (generationMode === '2D') {
+      setTwoDPreviewUrl(null)
+      setTwoDBaseImageUrl(null)
+      return
+    }
+    if (renderPreviewUrl) {
+      setRenderPreviewUrl(null)
+      setRenderFilePath(null)
+      setThreeDBaseImageUrl(null)
+      return
+    }
+    setThreeDPreviewUrl(null)
+    setThreeDBaseImageUrl(null)
   }
 
   // 分析中的加载提示
@@ -988,30 +989,48 @@ export default function ChatInterface() {
         open={twoDEditorOpen}
         onOpenChange={setTwoDEditorOpen}
         perspective={perspective}
-        onUse={(baseImageUrl) => setTwoDBaseImageUrl(baseImageUrl)}
+        onUse={({ previewUrl, baseImageUrl }) => {
+          console.log('[DEBUG TwoDEditorModal.onUse] Received:', { previewUrl, baseImageUrl })
+          setTwoDPreviewUrl(previewUrl)
+          setTwoDBaseImageUrl(baseImageUrl)
+          setGenerationMode('2D')
+        }}
+      />
+      <ThreeDAssetEditorModal
+        open={threeDEditorOpen}
+        onOpenChange={setThreeDEditorOpen}
+        onUse={({ previewUrl, baseImageUrl }) => {
+          console.log('[DEBUG ThreeDAssetEditorModal.onUse] Received:', { previewUrl, baseImageUrl })
+          setThreeDPreviewUrl(previewUrl)
+          setThreeDBaseImageUrl(baseImageUrl)
+          setGenerationMode('3D')
+        }}
       />
       <div className="max-w-5xl mx-auto flex flex-col h-full min-h-0">
         {isInitial ? (
           <div className="flex-1 flex flex-col items-center justify-center px-4 overflow-y-auto">
             <h1 className="text-[36px] font-extrabold tracking-tight mb-6">创造你想要的JOY</h1>
             <div className="w-full max-w-[915px] relative">
-              <TwoDBasePreview />
-              <RenderPreview />
               <ChatInput
                 input={input}
                 setInput={setInput}
                 handleSend={handleSend}
-	                isLoading={isLoading}
-	                insertPreset={insertPreset}
-                  runningLogVisible={showRunningLogBar}
-                  runningLogText={runningLogText}
-	                variant="center"
-	                onOpenThreeTest={() => handleThreeModalOpenChange(true)}
-                  onOpenTwoDEditor={() => setTwoDEditorOpen(true)}
-	                generationMode={generationMode}
-	                setGenerationMode={setGenerationMode}
+                isLoading={isLoading}
+                insertPreset={insertPreset}
+                runningLogVisible={showRunningLogBar}
+                runningLogText={runningLogText}
+                variant="center"
+                onOpenThreeTest={() => handleThreeModalOpenChange(true)}
+                onOpenTwoDEditor={() => setTwoDEditorOpen(true)}
+                onOpenThreeDEditor={() => setThreeDEditorOpen(true)}
+                generationMode={generationMode}
+                setGenerationMode={setGenerationMode}
                 perspective={perspective}
                 setPerspective={setPerspective}
+                titlePreviewUrl={titlePreviewUrl}
+                onClearTitlePreview={clearTitlePreview}
+                inputPreviewUrl={inputPreviewUrl}
+                onClearInputPreview={clearTitlePreview}
               />
             </div>
           </div>
@@ -1047,7 +1066,7 @@ export default function ChatInterface() {
                           onConfirm={handleConfirmAnalysis}
                           onCancel={handleCancelAnalysis}
                           isGenerating={false}
-                          originalPrompt={pendingPrompt}
+                          originalPrompt={pendingPromptOriginal || pendingPrompt}
                         />
                       </div>
                     )}
@@ -1057,23 +1076,26 @@ export default function ChatInterface() {
             </div>
 
             <div className="relative">
-		              <TwoDBasePreview />
-		              <RenderPreview />
-		              <ChatInput
-		                input={input}
-		                setInput={setInput}
-		                handleSend={handleSend}
-		                isLoading={isLoading}
-	                insertPreset={insertPreset}
-	                onOpenThreeTest={() => handleThreeModalOpenChange(true)}
-                  onOpenTwoDEditor={() => setTwoDEditorOpen(true)}
-                  runningLogVisible={showRunningLogBar}
-                  runningLogText={runningLogText}
-	                variant="center"
-	                generationMode={generationMode}
-	                setGenerationMode={setGenerationMode}
-	                perspective={perspective}
+              <ChatInput
+                input={input}
+                setInput={setInput}
+                handleSend={handleSend}
+                isLoading={isLoading}
+                insertPreset={insertPreset}
+                onOpenThreeTest={() => handleThreeModalOpenChange(true)}
+                onOpenTwoDEditor={() => setTwoDEditorOpen(true)}
+                onOpenThreeDEditor={() => setThreeDEditorOpen(true)}
+                runningLogVisible={showRunningLogBar}
+                runningLogText={runningLogText}
+                variant="center"
+                generationMode={generationMode}
+                setGenerationMode={setGenerationMode}
+                perspective={perspective}
                 setPerspective={setPerspective}
+                titlePreviewUrl={titlePreviewUrl}
+                onClearTitlePreview={clearTitlePreview}
+                inputPreviewUrl={inputPreviewUrl}
+                onClearInputPreview={clearTitlePreview}
               />
             </div>
           </>

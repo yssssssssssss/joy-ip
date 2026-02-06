@@ -165,6 +165,15 @@ def _log_and_tag_response(response):
     except Exception:
         pass
 
+    try:
+        path = request.path or '/'
+        if path.startswith('/api/'):
+            response.headers['Cache-Control'] = 'no-store, max-age=0'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+    except Exception:
+        pass
+
     return response
 
 # 创建全局实例
@@ -334,6 +343,9 @@ def _run_generation_job(job_id: str, requirement: str):
         pre_analysis = job_data.get('pre_analysis') if job_data else None
         base_image_path = job_data.get('base_image_path') if job_data else None
         
+        # DEBUG: 打印从 job_data 获取的 base_image_path
+        logger.info(f"[DEBUG] [Job {job_id}] 从 job_data 获取: base_image_path='{base_image_path}', job_data keys={list(job_data.keys()) if job_data else 'None'}")
+        
         logger.info(f"[Job {job_id}] 生成模式: {mode}, 视角: {perspective}")
         
         # 2D模式使用独立的生成流程
@@ -467,42 +479,52 @@ def _run_generation_job(job_id: str, requirement: str):
         
         # 使用统一的清洗函数处理分析结果
         analysis = sanitize_analysis_result(analysis)
+        if base_image_path:
+            # base_image_path ????????/???????????
+            analysis['\u8868\u60c5'] = ''
+            analysis['\u52a8\u4f5c'] = ''
         _update_job(job_id, analysis=analysis, progress=15)
 
-        # 步骤2: 表情与动作分析
-        if not _ensure_budget('match'):
-            return
-        _update_job(job_id, stage='match', progress=25)
-        expression_info = local_head.analyze_user_requirement(requirement)
-        
-        # 如果预分析中有动作，使用预分析的动作；否则重新分析
-        if not analysis.get('动作'):
-            action_type = local_body.classify_action_type(requirement)
-            analysis['动作'] = action_type
+        combined_images = []
+        if base_image_path:
+            _append_log(job_id, "检测到3D底图，将跳过表情/动作匹配与拼装步骤")
+            combined_images = [base_image_path]  # 只生成一张结果图
         else:
-            action_type = analysis['动作']
+            # 步骤2: 表情与动作分析
+            if not _ensure_budget('match'):
+                return
+            _update_job(job_id, stage='match', progress=25)
+            expression_info = local_head.analyze_user_requirement(requirement)
             
-        _append_log(job_id, f"表情分析: {expression_info}")
-        _append_log(job_id, f"动作类型: {action_type}")
+            # 如果预分析中有动作，使用预分析的动作；否则重新分析
+            if not analysis.get('动作'):
+                action_type = local_body.classify_action_type(requirement)
+                analysis['动作'] = action_type
+            else:
+                action_type = analysis['动作']
+                
+            _append_log(job_id, f"表情分析: {expression_info}")
+            _append_log(job_id, f"动作类型: {action_type}")
 
-        # 步骤3: 选择与组合基础图片
-        if not _ensure_budget('compose'):
-            return
-        _update_job(job_id, stage='compose', progress=35)
-        processor_result = local_processor.process_user_requirement(requirement, log_callback=lambda t: _append_log(job_id, t))
-        if not processor_result['success']:
-            duration_s = time.time() - job_wall_start
-            _update_job(job_id, status='failed', stage='compose', progress=100, error=processor_result.get('error', '图片处理失败'), details={
-                'action_type': processor_result.get('action_type'),
-                'body_images': processor_result.get('body_images', []),
-                'head_images': processor_result.get('head_images', []),
-                'total_generated': processor_result.get('total_generated', 0),
-                'processing_time': round(duration_s, 2),
-                'time_budget_s': time_budget_s,
-            })
-            return
+            # 步骤3: 选择与组合基础图片
+            if not _ensure_budget('compose'):
+                return
+            _update_job(job_id, stage='compose', progress=35)
+            processor_result = local_processor.process_user_requirement(requirement, log_callback=lambda t: _append_log(job_id, t))
+            if not processor_result['success']:
+                duration_s = time.time() - job_wall_start
+                _update_job(job_id, status='failed', stage='compose', progress=100, error=processor_result.get('error', '图片处理失败'), details={
+                    'action_type': processor_result.get('action_type'),
+                    'body_images': processor_result.get('body_images', []),
+                    'head_images': processor_result.get('head_images', []),
+                    'total_generated': processor_result.get('total_generated', 0),
+                    'processing_time': round(duration_s, 2),
+                    'time_budget_s': time_budget_s,
+                })
+                return
 
-        combined_images = processor_result['combined_images']
+            combined_images = processor_result['combined_images']
+
         _append_log(job_id, f"生成基础组合图片 {len(combined_images)} 张")
 
         # 步骤4-9: 统一处理配饰（服装、手拿、头戴）
@@ -567,6 +589,11 @@ def _run_generation_job(job_id: str, requirement: str):
             final_images = []
         else:
             final_images = passed_images
+
+        # When no accessory/generation is applied, prefer transparent previews for output.
+        # Gate checks still run on white/gray base images.
+        if not accessories_info and final_images:
+            final_images = _prefer_preview_images(final_images)
 
         # 步骤10: 验证图片并转为URL
         if not _ensure_budget('validate'):
@@ -664,6 +691,22 @@ def serve_2d_asset(filename):
         return ('', 404)
 
 
+@app.route('/data/<path:filename>')
+def serve_general_data(filename):
+    """提供 data 目录下其他素材的静态文件访问"""
+    try:
+        safe_name = str(filename or '').replace('\\', '/').strip()
+        if not safe_name or safe_name.startswith('/') or '..' in safe_name.split('/'):
+            return ('', 404)
+        # 排除 2d 目录（由上面 serve_2d_asset 处理，虽然 Flask 路由匹配机制可能已经处理了）
+        if safe_name.startswith('2d/'):
+             return send_from_directory('data', safe_name)
+             
+        return send_from_directory('data', safe_name)
+    except Exception:
+        return ('', 404)
+
+
 def _normalize_relative_url_path(url_path: str) -> str:
     if not isinstance(url_path, str):
         return ''
@@ -696,6 +739,33 @@ def _safe_local_path_from_url(url_path: str, allowed_prefix: str) -> str:
     return rel
 
 
+
+def _maybe_preview_path_from_base_image(image_path: str) -> str:
+    if not isinstance(image_path, str):
+        return ''
+    p = image_path.strip()
+    if not p:
+        return ''
+
+    lower = p.lower()
+    if lower.endswith('_white_bg.png'):
+        candidate = p[:-len('_white_bg.png')] + '.png'
+    elif lower.endswith('_gray_bg.png'):
+        candidate = p[:-len('_gray_bg.png')] + '.png'
+    else:
+        return ''
+
+    return candidate if os.path.exists(candidate) else ''
+
+
+def _prefer_preview_images(image_paths):
+    if not isinstance(image_paths, list):
+        return image_paths
+    out = []
+    for p in image_paths:
+        preview = _maybe_preview_path_from_base_image(str(p))
+        out.append(preview or p)
+    return out
 @app.route('/api/2d_assets', methods=['GET'])
 def list_2d_assets():
     """按视角/类型/动作列出 2D 素材（文件名排序）"""
@@ -814,6 +884,120 @@ def compose_2d_editor_image():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/3d_assets', methods=['GET'])
+def list_3d_assets():
+    """列出 3D 素材（用于 3D 素材拼模）"""
+    try:
+        asset_type = (request.args.get('type') or '').strip().lower()
+        action_type = (request.args.get('action') or '').strip()
+
+        if asset_type not in ('head', 'body'):
+            return jsonify({'success': False, 'error': '无效的 type（仅支持 head/body）'}), 400
+
+        if asset_type == 'head':
+            # 表情栏中的素材来自 data\face_front_per
+            folder = os.path.join('data', 'face_front_per')
+            url_prefix = "/data/face_front_per"
+        else:
+            # 动作栏素材映射
+            action_folder_map = {
+                'stand': 'body_stand',
+                'happy': 'body_happy',
+                'jump': 'body_jump',
+                'run': 'body_run',
+                'sit': 'body_sit',
+            }
+            folder_name = action_folder_map.get(action_type)
+            if not folder_name:
+                return jsonify({'success': False, 'error': '无效的 action'}), 400
+            folder = os.path.join('data', folder_name)
+            url_prefix = f"/data/{folder_name}"
+
+        if not os.path.exists(folder):
+            # 如果目录不存在，尝试创建（仅用于演示，实际应该预置素材）
+            os.makedirs(folder, exist_ok=True)
+            return jsonify({'success': True, 'items': []})
+
+        names = []
+        for name in os.listdir(folder):
+            if name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                names.append(name)
+        names.sort()
+
+        items = [{'name': name, 'url': f"{url_prefix}/{name}"} for name in names]
+        return jsonify({'success': True, 'items': items})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/3d_editor/compose', methods=['POST'])
+def compose_3d_editor_image():
+    """3D ??????????????? per-data.py"""
+    try:
+        data = request.get_json() or {}
+        head_url = data.get('head_url') or ''
+        body_url = data.get('body_url') or ''
+        action_type = (data.get('action_type') or 'stand').strip()
+
+        # ??URL ?????????????????data/ ????????
+        head_path = _safe_local_path_from_url(head_url, 'data')
+        body_path = _safe_local_path_from_url(body_url, 'data')
+        if not head_path or not body_path:
+            return jsonify({'success': False, 'error': '???????????'}), 400
+        if not head_path.lower().endswith('.png') or not body_path.lower().endswith('.png'):
+            return jsonify({'success': False, 'error': '?????png ???'}), 400
+
+        if not os.path.exists(head_path) or not os.path.exists(body_path):
+            return jsonify({'success': False, 'error': f'??????????? head={head_path}, body={body_path}'}), 404
+
+        from utils.module_loader import ModuleLoader
+        per_data = ModuleLoader.load('per-data.py')
+        if not per_data or not hasattr(per_data, 'compose_images_new_logic'):
+            return jsonify({'success': False, 'error': 'per-data.py ????????'}), 500
+
+        out_dir = os.path.join('output', '3d_editor')
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"3d_editor_{uuid.uuid4().hex}.png")
+
+        # ??? action_type ??per-data.py ??????????
+        action_map = {
+            'stand': '???',
+            'happy': '???',
+            'jump': '???',
+            'run': '???',
+            'sit': '???',
+        }
+        mapped_action = action_map.get(action_type)
+
+        # ????????????????????2000x2000 ?????? + 1024x1200 ????????
+        result_path = per_data.compose_images_new_logic(
+            body_path, head_path, out_path, action_type=mapped_action
+        )
+
+        preview_path = out_path
+        if not os.path.exists(preview_path):
+            return jsonify({'success': False, 'error': '??????'}), 500
+
+        # base_image_url: 1024x1200 ??????????????Gemini ????????
+        base_path = None
+        if isinstance(result_path, str) and os.path.exists(result_path):
+            base_path = result_path
+
+        expected_white_bg_path = f"{os.path.splitext(out_path)[0]}_white_bg.png"
+        if not base_path or not str(base_path).lower().endswith('_white_bg.png'):
+            if os.path.exists(expected_white_bg_path):
+                base_path = expected_white_bg_path
+
+        if not base_path or not os.path.exists(base_path):
+            return jsonify({'success': False, 'error': '????????????'}), 500
+
+        preview_url = f"/{preview_path.replace(os.sep, '/')}"
+        base_image_url = f"/{base_path.replace(os.sep, '/')}"
+        return jsonify({'success': True, 'url': base_image_url, 'base_image_url': base_image_url, 'preview_url': preview_url})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/start_generate', methods=['POST'])
 def start_generate():
     """
@@ -839,6 +1023,12 @@ def start_generate():
         base_image_url = data.get('base_image_url', None)  # 2D底图（可选）
         
         logger.info(f"请求参数: requirement='{requirement}'")
+        # DEBUG: 详细打印所有请求参数，检查 base_image_url
+        logger.info(f"[DEBUG] 完整请求参数: mode={data.get('mode')}, perspective={data.get('perspective')}, base_image_url={base_image_url}")
+        if base_image_url:
+            logger.info(f"[DEBUG] 收到 base_image_url: {base_image_url}")
+        else:
+            logger.info(f"[DEBUG] base_image_url 为空 (data keys: {list(data.keys())})")
         if pre_analysis:
             logger.info(f"使用预分析结果: {pre_analysis}")
         
@@ -862,8 +1052,13 @@ def start_generate():
         base_image_path = None
         if base_image_url:
             base_image_path = _safe_local_path_from_url(str(base_image_url), 'output')
+            logger.info(f"[DEBUG] _safe_local_path_from_url 结果: base_image_url='{base_image_url}' -> base_image_path='{base_image_path}'")
+            if base_image_path:
+                logger.info(f"[DEBUG] 文件路径验证: endswith('.png')={base_image_path.lower().endswith('.png')}, exists={os.path.exists(base_image_path)}")
             if not base_image_path or not base_image_path.lower().endswith('.png') or not os.path.exists(base_image_path):
+                logger.warning(f"[DEBUG] base_image_path 验证失败, 返回400错误")
                 return jsonify({'success': False, 'error': '无效的 base_image_url'}), 400
+            logger.info(f"[DEBUG] 正在调用 _update_job 存储 base_image_path: {base_image_path}")
             _update_job(job_id, base_image_url=str(base_image_url), base_image_path=base_image_path)
 
         # 如果有预分析结果，存储到任务中
@@ -1061,6 +1256,8 @@ def generate():
             logger.info(f"统一配件处理完成，图片数: {len(final_images)}")
         else:
             logger.info("跳过配件处理（无有效配件信息）")
+            if final_images:
+                final_images = _prefer_preview_images(final_images)
         
         # 背景处理已暂时移除，但保留接口供后续使用
         # if analysis.get('背景'):

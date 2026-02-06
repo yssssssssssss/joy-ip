@@ -2,7 +2,7 @@ import React from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { Send, Smile, Activity, Palette, Eye } from 'lucide-react'
+import { Send, Smile, Activity, Palette, Eye, X } from 'lucide-react'
 import RunningLogBar from './RunningLogBar'
 
 const PRESETS = {
@@ -41,6 +41,7 @@ interface ChatInputProps {
   variant?: 'bottom' | 'center'
   onOpenThreeTest?: () => void
   onOpenTwoDEditor?: () => void
+  onOpenThreeDEditor?: () => void
   runningLogVisible?: boolean
   runningLogText?: string
   // 新增: 2D/3D模式切换
@@ -49,6 +50,10 @@ interface ChatInputProps {
   // 新增: 视角选择
   perspective?: string
   setPerspective?: (perspective: string) => void
+  titlePreviewUrl?: string | null
+  onClearTitlePreview?: () => void
+  inputPreviewUrl?: string | null
+  onClearInputPreview?: () => void
 }
 
 export default function ChatInput({
@@ -60,78 +65,76 @@ export default function ChatInput({
   variant = 'bottom',
   onOpenThreeTest,
   onOpenTwoDEditor,
+  onOpenThreeDEditor,
   runningLogVisible = false,
   runningLogText = '',
   generationMode = '3D',
   setGenerationMode,
   perspective = '正视角',
-  setPerspective
+  setPerspective,
+  titlePreviewUrl = null,
+  onClearTitlePreview,
+  inputPreviewUrl = null,
+  onClearInputPreview,
 }: ChatInputProps) {
   const isCenter = variant === 'center'
   const is2DMode = generationMode === '2D'
+  const basePreviewUrl = titlePreviewUrl
 
-  // Tab切换组件
-  const TabSwitch = () => (
-    <div className="flex items-center gap-1 bg-[#2b2d33] rounded-[12px] p-1">
+  const PreviewThumb = ({
+    url,
+    alt,
+    objectClassName,
+    onClear,
+    clearLabel,
+  }: {
+    url: string
+    alt: string
+    objectClassName: string
+    onClear?: () => void
+    clearLabel: string
+  }) => (
+    <div className="relative mt-3 w-[92px] h-[92px]">
+      <img
+        src={url}
+        alt={alt}
+        className={`w-full h-full rounded-[16px] border border-white/10 bg-black/40 ${objectClassName}`}
+      />
       <button
-        onClick={() => setGenerationMode?.('2D')}
-        className={`px-4 py-2 rounded-[10px] text-sm font-medium transition-all duration-200 ${is2DMode
-          ? 'bg-gradient-to-r from-[#d580ff] to-[#a6ccfd] text-white shadow-lg'
-          : 'text-gray-400 hover:text-white hover:bg-white/10'
-          }`}
+        type="button"
+        onClick={onClear}
+        disabled={!onClear}
+        className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-black/70 border border-white/10 text-white/80 hover:text-white hover:bg-black/90 transition-all flex items-center justify-center"
+        aria-label={clearLabel}
       >
-        2D素材生成
-      </button>
-      <button
-        onClick={() => setGenerationMode?.('3D')}
-        className={`px-4 py-2 rounded-[10px] text-sm font-medium transition-all duration-200 ${!is2DMode
-          ? 'bg-gradient-to-r from-[#d580ff] to-[#a6ccfd] text-white shadow-lg'
-          : 'text-gray-400 hover:text-white hover:bg-white/10'
-          }`}
-      >
-        3D素材生成
+        <X className="w-3.5 h-3.5" />
       </button>
     </div>
   )
 
-  // 视角选择按钮 (仅在2D模式下显示)
-  const PerspectiveButton = () => {
-    if (!is2DMode) return null
-
-    return (
-      <Popover>
-        <PopoverTrigger asChild>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-[40px] px-4 rounded-[10px] bg-[#5a4b7a] text-[#e0d4ff] border-0 hover:bg-[#6b5a8a]"
-          >
-            <Eye className="w-5 h-5 mr-2" />
-            {perspective}
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent className="w-40 p-2 bg-[#1b1d21] text-white border-white/20">
-          <div className="grid grid-cols-1 gap-2">
-            {PERSPECTIVE_PRESET.perspective.options.map(option => (
-              <Button
-                key={option}
-                variant="outline"
-                size="sm"
-                className={`bg-black/30 text-white border-white/20 hover:bg-black/40 ${perspective === option ? 'ring-2 ring-[#d580ff]' : ''
-                  }`}
-                onClick={() => {
-                  setPerspective?.(option)
-                  insertPreset(option, 'perspective')
-                }}
-              >
-                {option}
-              </Button>
-            ))}
-          </div>
-        </PopoverContent>
-      </Popover>
-    )
-  }
+  // Tab切换组件
+  const TabSwitch = () => (
+    <div className="flex items-center bg-[#25262b] rounded-[10px] p-1 border border-white/5">
+      <button
+        onClick={() => setGenerationMode?.('2D')}
+        className={`px-3 py-1 rounded-[8px] text-[13px] font-bold transition-all duration-200 ${is2DMode
+          ? 'bg-[#3a3a4a] text-[#b7affe]'
+          : 'text-gray-500 hover:text-gray-400'
+          }`}
+      >
+        2D
+      </button>
+      <button
+        onClick={() => setGenerationMode?.('3D')}
+        className={`px-3 py-1 rounded-[8px] text-[13px] font-bold transition-all duration-200 ${!is2DMode
+          ? 'bg-[#3a3a4a] text-[#b7affe]'
+          : 'text-gray-500 hover:text-gray-400'
+          }`}
+      >
+        3D
+      </button>
+    </div>
+  )
 
   if (isCenter) {
     return (
@@ -142,110 +145,106 @@ export default function ChatInput({
             text={runningLogText} 
           />
 
-          <div className="w-full max-w-[915px] rounded-[30px] border border-white/15 bg-[#202126] shadow-[0_8px_24px_rgba(0,0,0,0.35)]">
-            {/* Tab切换 + 头部标题 */}
-            <div className="px-6 pt-5 pb-2">
-              <div className="flex items-center justify-between mb-4">
-                <TabSwitch />
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="bg-clip-text text-transparent bg-gradient-to-r from-[#d580ff] to-[#a6ccfd] text-[25px] mt-2 mb-2 font-bold leading-[28px]">
+          <div className="w-full max-w-[915px] rounded-[30px] border border-white/10 bg-[#16171d] shadow-[0_8px_32px_rgba(0,0,0,0.45)] flex flex-col min-h-[160px] p-6 pb-4">
+            {/* Top Section: Title and Input area */}
+            <div className="flex items-start gap-4 flex-1">
+              <div className="flex flex-col items-start">
+                <div className="text-[#b7affe] text-[19px] font-bold whitespace-nowrap pt-1">
                   {is2DMode ? '2D素材生成' : 'JOY生成'}
                 </div>
-                <div className="text-[20px] leading-[28px] text-[#8b8fa3] mt-2 mb-2">
-                  {is2DMode ? '描述你想要生成的2D素材' : '描述你想要生成的JOY'}
-                </div>
-              </div>
-            </div>
-
-            {/* 输入框 */}
-            <div className="px-6 pb-2 mb-2">
-              <div className="flex items-center">
-                <div className="flex-1">
-                  <Input
-                    value={input}
-                    onChange={e => setInput(e.target.value)}
-                    placeholder={is2DMode ? "描述你想要生成的2D素材" : "描述你想要生成的JOY"}
-                    onKeyDown={e => e.key === 'Enter' && handleSend()}
-                    disabled={isLoading}
-                    className="h-[50px] pr-10 bg-[#2b2d33] text-white border-0 placeholder:text-gray-500 rounded-[12px] focus:ring-2 focus:ring-primary"
+                {basePreviewUrl ? (
+                  <PreviewThumb
+                    url={basePreviewUrl}
+                    alt="底图预览"
+                    objectClassName="object-cover"
+                    onClear={onClearTitlePreview}
+                    clearLabel="删除预览图"
                   />
-                </div>
-                {isLoading && (
-                  <div className="ml-2">
-                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-                  </div>
-                )}
+                ) : null}
+                {inputPreviewUrl ? (
+                  <PreviewThumb
+                    url={inputPreviewUrl}
+                    alt="Compose Preview"
+                    objectClassName="object-contain"
+                    onClear={onClearInputPreview}
+                    clearLabel="Clear compose preview"
+                  />
+                ) : null}
+              </div>
+              
+              <div className="flex-1 flex flex-col">
+                <textarea
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  placeholder={is2DMode ? "描述你想要生成的2D素材" : "描述你想要生成的JOY"}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  disabled={isLoading}
+                  className="flex-1 bg-transparent border-0 outline-none text-gray-200 placeholder:text-gray-600 resize-none text-[17px] py-1.5 min-h-[60px] font-normal"
+                />
               </div>
             </div>
 
-            {/* 预设按钮 + 3D场景 + 发送 */}
-            <div className="px-6 pb-5">
-              <div className="flex items-center gap-2 flex-wrap">
-                {/* 2D模式下显示视角按钮 */}
-                <PerspectiveButton />
-
-                {/* 原有的预设按钮 */}
-                {Object.entries(PRESETS).map(([key, preset]) => (
-                  <Popover key={key}>
-                    <PopoverTrigger asChild>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-[40px] px-4 rounded-[10px] bg-[#424158] text-[#b7affe] border-0 hover:bg-[#4a4964]"
-                      >
-                        <img
-                          src={key === 'expression' ? '/icons/head.svg' : key === 'action' ? '/icons/body.svg' : '/icons/style.svg'}
-                          alt=""
-                          className="w-6 h-6 mr-2"
-                        />
-                        {preset.label}
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-60 p-2 bg-[#1b1d21] text-white border-white/20">
-                      <div className="grid grid-cols-2 gap-2">
-                        {preset.options.map(option => (
-                          <Button
-                            key={option}
-                            variant="outline"
-                            size="sm"
-                            className="bg-black/30 text-white border-white/20 hover:bg-black/40"
-                            onClick={() => insertPreset(option, key as any)}
-                          >
-                            {option}
-                          </Button>
-                        ))}
-                      </div>
-                    </PopoverContent>
-                  </Popover>
-                ))}
-
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-[40px] px-4 rounded-[10px] bg-[#424158] text-[#b7affe] border-0 hover:bg-[#4a4964]"
-                  onClick={() => onOpenTwoDEditor?.()}
-                >
-                  2D素材编辑器
-                </Button>
-
-                {/* 3D场景按钮 (仅在3D模式下显示) */}
-                {!is2DMode && (
+            {/* Bottom Section: Mode switch, buttons, and send */}
+            <div className="flex items-center justify-between mt-2">
+              <div className="flex items-center gap-3">
+                <TabSwitch />
+                
+                {is2DMode ? (
                   <Button
                     variant="outline"
                     size="sm"
-                    className="h-[40px] px-4 rounded-[10px] bg-[#424158] text-[#b7affe] border-0 hover:bg-[#4a4964]"
-                    onClick={() => onOpenThreeTest?.()}
+                    className="h-[40px] px-3.5 rounded-[11px] bg-[#3a3a4a] text-[#b7affe] border-0 hover:bg-[#4a4964] flex items-center gap-2 text-[13px] font-bold"
+                    onClick={() => onOpenTwoDEditor?.()}
                   >
-                    3D场景
+                    <div className="w-6 h-6 rounded-full bg-black/40 flex items-center justify-center overflow-hidden">
+                      <Palette className="w-3.5 h-3.5 text-[#b7affe]" />
+                    </div>
+                    2D素材拼装
                   </Button>
+                ) : (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-[40px] px-3.5 rounded-[11px] bg-[#3a3a4a] text-[#b7affe] border-0 hover:bg-[#4a4964] flex items-center gap-2 text-[13px] font-bold"
+                      onClick={() => onOpenThreeTest?.()}
+                    >
+                      <div className="w-6 h-6 rounded-full bg-black/40 flex items-center justify-center overflow-hidden">
+                        <Smile className="w-3.5 h-3.5 text-[#b7affe]" />
+                      </div>
+                      3D渲染建模
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-[40px] px-3.5 rounded-[11px] bg-[#3a3a4a] text-[#b7affe] border-0 hover:bg-[#4a4964] flex items-center gap-2 text-[13px] font-bold"
+                      onClick={() => onOpenThreeDEditor?.()}
+                    >
+                      <div className="w-6 h-6 rounded-full bg-black/40 flex items-center justify-center overflow-hidden">
+                        <Activity className="w-3.5 h-3.5 text-[#b7affe]" />
+                      </div>
+                      3D素材拼模
+                    </Button>
+                  </>
                 )}
+              </div>
 
-                <div className="ml-auto">
-                  <Button onClick={() => handleSend()} disabled={isLoading || !input.trim()} className="rounded-full h-[50px] w-[50px] bg-gradient-to-r from-[#d580ff] to-[#a6ccfd] text-white hover:opacity-90 hover:shadow-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed">
-                    <Send className="w-5 h-5" />
-                  </Button>
-                </div>
+              <div className="flex items-center gap-3">
+                {isLoading && (
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white/60"></div>
+                )}
+                <Button 
+                  onClick={() => handleSend()} 
+                  disabled={isLoading || !input.trim()} 
+                  className="rounded-full h-[52px] w-[52px] bg-[#2b2d33] text-gray-400 border border-white/5 hover:bg-[#35373d] hover:text-white transition-all duration-200 disabled:opacity-20 disabled:cursor-not-allowed flex-shrink-0 shadow-lg"
+                >
+                  <Send className="w-5 h-5" />
+                </Button>
               </div>
             </div>
           </div>
@@ -253,6 +252,8 @@ export default function ChatInput({
       </div>
     )
   }
+
+
 
   // bottom variant
   return (

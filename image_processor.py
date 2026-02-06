@@ -174,10 +174,17 @@ class ImageProcessor:
     def combine_images(self, body_images: List[str], head_images: List[Dict], 
                       action_type: str, output_dir: str = "output", log_callback: Optional[Callable[[str], None]] = None) -> List[str]:
         """组合身体和头像图片（支持并行）"""
+        _, white_bg_images = self.combine_images_dual(body_images, head_images, action_type, output_dir, log_callback=log_callback)
+        return white_bg_images
+
+    def combine_images_dual(self, body_images: List[str], head_images: List[Dict],
+                            action_type: str, output_dir: str = "output", log_callback: Optional[Callable[[str], None]] = None) -> Tuple[List[str], List[str]]:
+        """组合身体和头像图片（支持并行），同时产出透底图与白底图"""
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
-        combined_images = []
+        transparent_images: List[str] = []
+        white_bg_images: List[str] = []
         # 为本次组合生成唯一标签，避免文件名重名
         from datetime import datetime
         unique_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + '_' + uuid.uuid4().hex[:4]
@@ -197,30 +204,46 @@ class ImageProcessor:
                 idx += 1
 
         if not tasks:
-            return []
+            return [], []
 
-        def _run_one(task_idx: int, body_path: str, head_path: str) -> Optional[str]:
+        def _run_one(task_idx: int, body_path: str, head_path: str) -> Tuple[Optional[str], Optional[str]]:
             suffix = f"{unique_tag}_{task_idx}"
             if action_type == "跳跃":
-                return self._combine_jump_images(body_path, head_path, output_dir, suffix)
-            if action_type == "跑动":
-                return self._combine_running_images(body_path, head_path, output_dir, suffix)
-            return self._combine_normal_images(body_path, head_path, output_dir, suffix)
+                output_path = os.path.join(output_dir, f"combined_jump_{suffix}.png")
+            elif action_type == "跑动":
+                output_path = os.path.join(output_dir, f"combined_running_{suffix}.png")
+            else:
+                output_path = os.path.join(output_dir, f"combined_normal_{suffix}.png")
+
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+                result = compose_images_new_logic(body_path, head_path, output_path, action_type=action_type, create_white_bg=True)
+                transparent_path = output_path if isinstance(output_path, str) and os.path.exists(output_path) else None
+                white_path: Optional[str] = None
+                if isinstance(result, str) and os.path.exists(result):
+                    white_path = result
+                elif transparent_path:
+                    white_path = transparent_path
+                return transparent_path, white_path
+            except Exception:
+                return None, None
 
         workers = min(max_workers, len(tasks))
         if workers <= 1:
             for task_idx, body_path, head_path in tasks:
-                combined_path = _run_one(task_idx, body_path, head_path)
-                if combined_path:
-                    combined_images.append(combined_path)
+                transparent_path, white_path = _run_one(task_idx, body_path, head_path)
+                if transparent_path:
+                    transparent_images.append(transparent_path)
+                if white_path:
+                    white_bg_images.append(white_path)
                     if log_callback:
                         try:
-                            log_callback(f"生成组合图片: {combined_path}")
+                            log_callback(f"生成组合图片: {white_path}")
                         except Exception:
                             pass
-            return combined_images
+            return transparent_images, white_bg_images
 
-        results: Dict[int, Optional[str]] = {}
+        results: Dict[int, Tuple[Optional[str], Optional[str]]] = {}
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_idx = {
                 executor.submit(_run_one, task_idx, body_path, head_path): task_idx
@@ -231,19 +254,21 @@ class ImageProcessor:
                 try:
                     results[task_idx] = future.result()
                 except Exception:
-                    results[task_idx] = None
+                    results[task_idx] = (None, None)
 
         for task_idx in sorted(results.keys()):
-            combined_path = results.get(task_idx)
-            if combined_path:
-                combined_images.append(combined_path)
+            transparent_path, white_path = results.get(task_idx, (None, None))
+            if transparent_path:
+                transparent_images.append(transparent_path)
+            if white_path:
+                white_bg_images.append(white_path)
                 if log_callback:
                     try:
-                        log_callback(f"生成组合图片: {combined_path}")
+                        log_callback(f"生成组合图片: {white_path}")
                     except Exception:
                         pass
         
-        return combined_images
+        return transparent_images, white_bg_images
 
     def process_user_requirement(self, requirement: str, output_dir: str = "output", log_callback: Optional[Callable[[str], None]] = None) -> Dict:
         msg0 = f"开始处理用户需求：{requirement}"
@@ -284,7 +309,8 @@ class ImageProcessor:
         max_compose_retries = int(os.environ.get("COMPOSE_MAX_RETRIES", "1"))
         combined_images: List[str] = []
         for attempt in range(max_compose_retries + 1):
-            combined_images = self.combine_images(body_images, head_images, action_type, output_dir, log_callback=log_callback)
+            transparent_images, white_bg_images = self.combine_images_dual(body_images, head_images, action_type, output_dir, log_callback=log_callback)
+            combined_images = white_bg_images
             if combined_images:
                 break
             if attempt < max_compose_retries:
@@ -310,6 +336,8 @@ class ImageProcessor:
             "action_type": action_type,
             "body_images": body_images,
             "head_images": [img["image_path"] for img in head_images],
+            "transparent_images": transparent_images,
+            "white_bg_images": combined_images,
             "combined_images": combined_images,
             "total_generated": len(combined_images)
         }

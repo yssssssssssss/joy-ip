@@ -6,27 +6,25 @@ import { X } from 'lucide-react'
 
 type AssetItem = { name: string; url: string }
 
-type TwoDEditorModalProps = {
+type ThreeDAssetEditorModalProps = {
   open: boolean
   onOpenChange: (open: boolean) => void
-  perspective: string
   onUse: (payload: { previewUrl: string; baseImageUrl: string }) => void
 }
 
 const ACTION_OPTIONS = [
-  { label: '站立', value: '站姿' },
-  { label: '动感', value: '欢快' },
-  { label: '跳跃', value: '跳跃' },
-  { label: '跑动', value: '跑动' },
-  { label: '坐姿', value: '坐姿' },
+  { label: '站立', value: 'stand' },
+  { label: '动感', value: 'happy' },
+  { label: '跳跃', value: 'jump' },
+  { label: '跑步', value: 'run' },
+  { label: '坐姿', value: 'sit' },
 ] as const
 
-export default function TwoDEditorModal({
+export default function ThreeDAssetEditorModal({
   open,
   onOpenChange,
-  perspective,
   onUse,
-}: TwoDEditorModalProps) {
+}: ThreeDAssetEditorModalProps) {
   const [headAssets, setHeadAssets] = useState<AssetItem[]>([])
   const [bodyAssets, setBodyAssets] = useState<AssetItem[]>([])
   const [selectedHeadUrl, setSelectedHeadUrl] = useState<string | null>(null)
@@ -44,7 +42,7 @@ export default function TwoDEditorModal({
   const isComposingRef = useRef(false)
   const lastAutoComposeKeyRef = useRef<string | null>(null)
 
-  const canCompose = Boolean(selectedHeadUrl && selectedBodyUrl && selectedAction && !isComposing)
+  const canCompose = Boolean(selectedHeadUrl && selectedBodyUrl && !isComposing)
 
   const resetAll = () => {
     setSelectedHeadUrl(null)
@@ -75,6 +73,7 @@ export default function TwoDEditorModal({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [open, onOpenChange])
 
+  // 获取表情素材
   useEffect(() => {
     if (!open) return
     resetAll()
@@ -84,8 +83,8 @@ export default function TwoDEditorModal({
     const controller = new AbortController()
     ;(async () => {
       try {
-        const res = await axios.get('/api/2d_assets', {
-          params: { perspective, type: 'head' },
+        const res = await axios.get('/api/3d_assets', {
+          params: { type: 'head' },
           signal: controller.signal,
           timeout: 0,
         })
@@ -100,8 +99,9 @@ export default function TwoDEditorModal({
     })()
 
     return () => controller.abort()
-  }, [open, perspective])
+  }, [open])
 
+  // 获取身体素材
   useEffect(() => {
     if (!open) return
     if (!selectedAction) {
@@ -118,8 +118,8 @@ export default function TwoDEditorModal({
     const controller = new AbortController()
     ;(async () => {
       try {
-        const res = await axios.get('/api/2d_assets', {
-          params: { perspective, type: 'body', action: selectedAction },
+        const res = await axios.get('/api/3d_assets', {
+          params: { type: 'body', action: selectedAction },
           signal: controller.signal,
           timeout: 0,
         })
@@ -134,10 +134,10 @@ export default function TwoDEditorModal({
     })()
 
     return () => controller.abort()
-  }, [open, perspective, selectedAction])
+  }, [open, selectedAction])
 
   const handleCompose = useCallback(async () => {
-    if (!selectedHeadUrl || !selectedBodyUrl || !selectedAction) return
+    if (!selectedHeadUrl || !selectedBodyUrl) return
     if (isComposingRef.current) return
     isComposingRef.current = true
     setIsComposing(true)
@@ -146,7 +146,7 @@ export default function TwoDEditorModal({
     setBaseImageUrl(null)
     try {
       const res = await axios.post(
-        '/api/2d_editor/compose',
+        '/api/3d_editor/compose',
         { head_url: selectedHeadUrl, body_url: selectedBodyUrl, action_type: selectedAction },
         { timeout: 0 }
       )
@@ -166,25 +166,25 @@ export default function TwoDEditorModal({
 
   // 自动拼装逻辑
   useEffect(() => {
-    if (!selectedHeadUrl || !selectedBodyUrl || !selectedAction) return
-    const nextKey = `${selectedHeadUrl}|${selectedBodyUrl}|${selectedAction}`
+    if (!selectedHeadUrl || !selectedBodyUrl) return
+    const nextKey = `${selectedHeadUrl}|${selectedBodyUrl}|${selectedAction ?? ''}`
     if (lastAutoComposeKeyRef.current === nextKey) return
     if (isComposingRef.current) return
     lastAutoComposeKeyRef.current = nextKey
     handleCompose()
   }, [selectedHeadUrl, selectedBodyUrl, selectedAction, handleCompose])
 
-  if (!open) return null
-
   const handleDownload = () => {
     if (!previewUrl) return
     const link = document.createElement('a')
     link.href = previewUrl
-    link.download = `joy_2d_${Date.now()}.png`
+    link.download = `joy_3d_${Date.now()}.png`
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
   }
+
+  if (!open) return null
 
   return (
     <div
@@ -197,7 +197,7 @@ export default function TwoDEditorModal({
       >
         {/* Header */}
         <div className="flex items-center justify-between px-10 py-8">
-          <div className="text-[32px] font-bold text-white tracking-tight">JOY 2D 素材拼模</div>
+          <div className="text-[32px] font-bold text-white tracking-tight">JOY 3D 素材拼模</div>
           <button
             onClick={() => onOpenChange(false)}
             className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all"
@@ -209,22 +209,12 @@ export default function TwoDEditorModal({
         <div className="flex-1 min-h-0 flex px-10 pb-10 gap-10">
           {/* Left Panel: Selectors */}
           <div className="w-[480px] flex flex-col gap-8">
-            {/* Perspective Switch */}
-            <div className="flex gap-3">
-              <button className={`flex-1 py-3 rounded-[16px] text-base font-bold transition-all ${perspective === '正视角' ? 'bg-[#3a3a4a] text-[#b7affe] border border-[#b7affe]/30' : 'bg-[#25262b] text-gray-500 hover:text-gray-400'}`}>
-                正视角
-              </button>
-              <button className={`flex-1 py-3 rounded-[16px] text-base font-bold transition-all ${perspective === '仰视角' ? 'bg-[#3a3a4a] text-[#b7affe] border border-[#b7affe]/30' : 'bg-[#25262b] text-gray-500 hover:text-gray-400'}`}>
-                仰视角
-              </button>
-            </div>
-
             {/* Expression Section */}
             <div className="flex flex-col gap-4">
               <div className="text-base text-gray-400 font-bold ml-1">表情</div>
               <div
                 ref={headGridRef}
-                className="bg-[#1a1c22]/80 rounded-[24px] p-5 h-[240px] overflow-y-auto custom-scrollbar border border-white/5"
+                className="bg-[#1a1c22]/80 rounded-[24px] p-5 h-[280px] overflow-y-auto custom-scrollbar border border-white/5"
               >
                 {isLoadingHead ? (
                   <div className="flex items-center justify-center h-full text-gray-500 text-sm italic">加载素材中...</div>
@@ -273,12 +263,12 @@ export default function TwoDEditorModal({
                       {sortedBodyAssets.map((item) => (
                         <button
                           key={item.url}
-                        className={`aspect-square rounded-[16px] overflow-hidden bg-black border-2 transition-all ${
-                          selectedBodyUrl === item.url ? 'border-[#b7affe] bg-[#b7affe]/10 shadow-[0_0_15px_rgba(183,175,254,0.3)]' : 'border-transparent hover:border-white/10'
-                        }`}
-                        style={{ aspectRatio: '1 / 1' }}
-                        onClick={() => setSelectedBodyUrl(item.url)}
-                      >
+                          className={`aspect-square rounded-[16px] overflow-hidden bg-black border-2 transition-all ${
+                            selectedBodyUrl === item.url ? 'border-[#b7affe] bg-[#b7affe]/10 shadow-[0_0_15px_rgba(183,175,254,0.3)]' : 'border-transparent hover:border-white/10'
+                          }`}
+                          style={{ aspectRatio: '1 / 1' }}
+                          onClick={() => setSelectedBodyUrl(item.url)}
+                        >
                           <img src={item.url} alt={item.name} className="w-full h-full object-contain p-1" />
                         </button>
                       ))}

@@ -10,7 +10,6 @@ export default function RunningLogBar({ visible, text }: RunningLogBarProps) {
   const measureRef = useRef<HTMLSpanElement>(null)
   const textRef = useRef<HTMLSpanElement>(null)
   const [marqueeKey, setMarqueeKey] = useState(0)
-  const [stepIndex, setStepIndex] = useState(0)
   const [marquee, setMarquee] = useState<{ enabled: boolean; distancePx: number; durationSec: number }>({
     enabled: false,
     distancePx: 0,
@@ -43,15 +42,14 @@ export default function RunningLogBar({ visible, text }: RunningLogBarProps) {
     }
     return parts.length > 1 ? parts : byLines
   })()
-  const isStepsMode = steps.length > 1
-  const activeText = isStepsMode ? (steps[stepIndex] ?? steps[0] ?? '') : displayText
+  const activeText = steps[steps.length - 1] ?? displayText
 
   const recalcMarquee = useCallback(() => {
     const container = containerRef.current
     const measure = measureRef.current
     if (!container || !measure) return
 
-    if (!visible || !activeText || isStepsMode) {
+    if (!visible || !activeText) {
       setMarquee(prev => (prev.enabled ? { enabled: false, distancePx: 0, durationSec: 0 } : prev))
       return
     }
@@ -72,7 +70,7 @@ export default function RunningLogBar({ visible, text }: RunningLogBarProps) {
       if (prev.enabled && prev.distancePx === distancePx && prev.durationSec === durationSec) return prev
       return { enabled: true, distancePx, durationSec }
     })
-  }, [visible, activeText, isStepsMode])
+  }, [visible, activeText])
 
   useLayoutEffect(() => {
     recalcMarquee()
@@ -82,20 +80,6 @@ export default function RunningLogBar({ visible, text }: RunningLogBarProps) {
     if (!visible) return
     setMarqueeKey(key => key + 1)
   }, [visible, activeText])
-
-  useEffect(() => {
-    if (!visible || !isStepsMode) return
-    setStepIndex(0)
-  }, [visible, isStepsMode, displayText])
-
-  useEffect(() => {
-    if (!visible || !isStepsMode) return
-    if (steps.length <= 1) return
-    const timer = window.setInterval(() => {
-      setStepIndex(prev => (prev + 1) % steps.length)
-    }, 1600)
-    return () => window.clearInterval(timer)
-  }, [visible, isStepsMode, steps.length])
 
   useEffect(() => {
     if (!visible) return
@@ -131,19 +115,6 @@ export default function RunningLogBar({ visible, text }: RunningLogBarProps) {
             >
               {activeText}
             </span>
-            {isStepsMode ? (
-              <div
-                className="transition-transform duration-300 will-change-transform"
-                style={{ transform: `translateY(-${stepIndex * 32}px)` }}
-                aria-live="polite"
-              >
-                {steps.map((s, i) => (
-                  <div key={`${i}-${s}`} className="h-8 flex items-center">
-                    <span className="block text-xs text-white/70 truncate w-full">{s}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
             <span
               key={marqueeKey}
               ref={textRef}
@@ -160,7 +131,6 @@ export default function RunningLogBar({ visible, text }: RunningLogBarProps) {
             >
               {activeText}
             </span>
-            )}
           </div>
         </div>
       </div>

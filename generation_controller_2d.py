@@ -545,8 +545,8 @@ class GenerationController2D:
                 _emit(result["error"])
                 return result
 
-            images = [base_image_path]
-            _emit(f"使用底图，跳过头/身匹配与拼装: {base_image_path}")
+            images = [base_image_path, base_image_path]
+            _emit(f"使用底图，跳过头/身匹配与拼装，将基于底图生成2张: {base_image_path}")
         else:
             # 步骤1: 匹配头像和身体（各选2张，组合生成4张）
             try:

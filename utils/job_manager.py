@@ -41,6 +41,8 @@ class Job:
     pre_analysis: Optional[Dict] = None  # 用户确认的预分析结果
     mode: str = "3D"  # 生成模式：2D 或 3D
     perspective: str = "正视角"  # 视角：正视角 或 仰视角
+    base_image_url: Optional[str] = None  # 2D/3D 编辑器生成的底图 URL
+    base_image_path: Optional[str] = None  # 底图本地文件路径
     images: List[str] = field(default_factory=list)
     error: Optional[str] = None
     details: Dict = field(default_factory=dict)
@@ -66,6 +68,8 @@ class Job:
             "pre_analysis": self.pre_analysis,
             "mode": self.mode,
             "perspective": self.perspective,
+            "base_image_url": self.base_image_url,
+            "base_image_path": self.base_image_path,
             "images": self.images,
             "error": self.error,
             "details": self.details,

@@ -401,7 +401,7 @@ def create_white_background_image(merged_image_path, output_dir):
         return None
 
 
-def compose_images_new_logic(body_img_path, face_img_path, output_path, action_type=None):
+def compose_images_new_logic(body_img_path, face_img_path, output_path, action_type=None, create_white_bg: bool = True):
     """
     新的图片合成逻辑：
     1. 识别body_img中红色区域角度a
@@ -676,15 +676,18 @@ def compose_images_new_logic(body_img_path, face_img_path, output_path, action_t
         print(f"[OK] 最终合成图片已保存到: {output_path}")
         print("[OK] 尺寸: 2000x2000，透明背景")
         
-        # 步骤9: 创建1024x1200白色背景图，将合图按底边对齐放置
-        print("\n--- 步骤9: 创建1024x1200白色背景图并底边对齐 ---")
-        white_bg_path = create_white_background_image(output_path, output_dir)
-        if white_bg_path:
-            print(f"[OK] 白色背景图已保存到: {white_bg_path}")
-            return white_bg_path  # 返回白色背景图的路径，供后续流程使用
-        else:
-            print("[FAIL] 创建白色背景图失败，返回原始合成图路径")
-            return output_path
+        if create_white_bg:
+            # 步骤9: 创建1024x1200白色背景图，将合图按底边对齐放置
+            print("\n--- 步骤9: 创建1024x1200白色背景图并底边对齐 ---")
+            white_bg_path = create_white_background_image(output_path, output_dir)
+            if white_bg_path:
+                print(f"[OK] 白色背景图已保存到: {white_bg_path}")
+                return white_bg_path  # 返回白色背景图的路径，供后续流程使用
+            else:
+                print("[FAIL] 创建白色背景图失败，返回原始合成图路径")
+                return output_path
+
+        return output_path
     else:
         print("[FAIL] 保存图片失败")
         return False

@@ -1,6 +1,7 @@
 "use client"
 
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
+import { X } from 'lucide-react'
 
 type ThreeEditorModalProps = {
   open: boolean
@@ -13,96 +14,24 @@ type ThreeEditorModalProps = {
   onGenerate: () => void
 }
 
-const MAX_MODAL_WIDTH_PX = 1000
-const MAX_MODAL_VIEWPORT_RATIO = 0.92
+type ApprovedModel = { name?: string; url: string; preview: string }
 
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
-
-type ModalLayout = {
-  width: number
-  height: number
-  iframeSide: number
-  chromeHeight: number
-}
+const LIGHT_OPTIONS = [
+  { label: '强对比', value: '强对比' },
+  { label: '常规', value: '常规' },
+  { label: '弱对比', value: '弱对比' },
+] as const
 
 export default function ThreeEditorModal({
   open,
   onOpenChange,
   renderPreviewUrl,
-  renderFilePath,
-  threePrompt,
-  onThreePromptChange,
   isLoading,
-  onGenerate,
 }: ThreeEditorModalProps) {
-  const inputRef = useRef<HTMLInputElement>(null)
-  const headerRef = useRef<HTMLDivElement>(null)
-  const footerRef = useRef<HTMLDivElement>(null)
-  const [layout, setLayout] = useState<ModalLayout | null>(null)
-
-  const computeLayout = useCallback(() => {
-    if (typeof window === 'undefined') return
-
-    const maxHeight = Math.floor(window.innerHeight * MAX_MODAL_VIEWPORT_RATIO)
-    const maxWidth = Math.floor(Math.min(MAX_MODAL_WIDTH_PX, window.innerWidth * MAX_MODAL_VIEWPORT_RATIO))
-
-    const headerHeight = Math.ceil(headerRef.current?.getBoundingClientRect().height ?? 0)
-    const footerHeight = Math.ceil(footerRef.current?.getBoundingClientRect().height ?? 0)
-    const measuredChromeHeight = headerHeight + footerHeight
-    setLayout(prev => {
-      const chromeHeight =
-        measuredChromeHeight > 0
-          ? measuredChromeHeight
-          : prev?.chromeHeight ?? 160
-
-      // 以高度为标准自适配：优先用高度算出 iframe 正方形边长，再用宽度上限兜底
-      const iframeSide = Math.max(1, Math.floor(Math.min(maxWidth, maxHeight - chromeHeight)))
-      const nextLayout: ModalLayout = {
-        width: iframeSide,
-        height: chromeHeight + iframeSide,
-        iframeSide,
-        chromeHeight,
-      }
-      if (
-        prev &&
-        prev.width === nextLayout.width &&
-        prev.height === nextLayout.height &&
-        prev.iframeSide === nextLayout.iframeSide &&
-        prev.chromeHeight === nextLayout.chromeHeight
-      ) {
-        return prev
-      }
-      return nextLayout
-    })
-  }, [])
-
-  useLayoutEffect(() => {
-    if (!open) return
-    let cancelled = false
-    let frameId = 0
-    let rounds = 0
-
-    const tick = () => {
-      if (cancelled) return
-      computeLayout()
-      rounds += 1
-      if (rounds < 3) frameId = window.requestAnimationFrame(tick)
-    }
-
-    tick()
-
-    const onResize = () => {
-      rounds = 0
-      tick()
-    }
-    window.addEventListener('resize', onResize)
-
-    return () => {
-      cancelled = true
-      window.cancelAnimationFrame(frameId)
-      window.removeEventListener('resize', onResize)
-    }
-  }, [computeLayout, open])
+  const [selectedLight, setSelectedLight] = useState<string>('强对比')
+  const [approvedModels, setApprovedModels] = useState<ApprovedModel[]>([])
+  const [isLoadingApprovedModels, setIsLoadingApprovedModels] = useState(false)
+  const threeEditorIframeRef = useRef<HTMLIFrameElement | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -115,147 +44,193 @@ export default function ThreeEditorModal({
 
   useEffect(() => {
     if (!open) return
-    const timer = window.setTimeout(() => inputRef.current?.focus(), 0)
-    return () => window.clearTimeout(timer)
+    setIsLoadingApprovedModels(true)
+    ;(async () => {
+      try {
+        const resp = await fetch('/three-editor/approved-models.json', { cache: 'no-store' })
+        if (!resp.ok) throw new Error('加载预审模型失败')
+        const list = await resp.json()
+        setApprovedModels(Array.isArray(list) ? list : [])
+      } catch {
+        setApprovedModels([])
+      } finally {
+        setIsLoadingApprovedModels(false)
+      }
+    })()
   }, [open])
 
   if (!open) return null
 
-  const iframeSide =
-    layout?.iframeSide ??
-    (() => {
-      if (typeof window === 'undefined') return 720
-      const maxHeight = Math.floor(window.innerHeight * MAX_MODAL_VIEWPORT_RATIO)
-      const maxWidth = Math.floor(Math.min(MAX_MODAL_WIDTH_PX, window.innerWidth * MAX_MODAL_VIEWPORT_RATIO))
-      const chromeHeight = layout?.chromeHeight ?? 160
-      return Math.max(1, Math.floor(Math.min(maxWidth, maxHeight - chromeHeight)))
-    })()
-  const uiScale = clamp(iframeSide / 720, 0.75, 1.15)
-  const ui = {
-    headerFontSize: Math.round(clamp(14 * uiScale, 12, 16)),
-    hintFontSize: Math.round(clamp(12 * uiScale, 11, 14)),
-    controlFontSize: Math.round(clamp(14 * uiScale, 12, 16)),
-    controlHeight: Math.round(clamp(44 * uiScale, 34, 54)),
-    previewSize: Math.round(clamp(48 * uiScale, 32, 56)),
-    headerPaddingX: Math.round(clamp(12 * uiScale, 10, 16)),
-    headerPaddingY: Math.round(clamp(8 * uiScale, 6, 12)),
-    footerPaddingX: Math.round(clamp(16 * uiScale, 12, 20)),
-    footerPaddingY: Math.round(clamp(12 * uiScale, 10, 16)),
-    controlPaddingX: Math.round(clamp(16 * uiScale, 12, 18)),
-    buttonPaddingX: Math.round(clamp(24 * uiScale, 16, 28)),
-    radius: Math.round(clamp(12 * uiScale, 10, 16)),
-    gap: Math.round(clamp(12 * uiScale, 8, 14)),
-  }
-
-  const modalStyle: React.CSSProperties = layout
-    ? { width: layout.width }
-    : { width: 'min(1000px, 92vw)' }
-
-  const isCompact = iframeSide < 560
-
   return (
     <div
-      className="fixed inset-0 z-[9998] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-[9998] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm font-sans"
       role="dialog"
       aria-modal="true"
     >
       <div
-        className="bg-[#0f1419] border border-gray-700 overflow-hidden shadow-2xl flex flex-col"
-        style={{ ...modalStyle, borderRadius: ui.radius }}
+        className="bg-[#16171d] rounded-[40px] overflow-hidden shadow-2xl flex flex-col w-[1200px] h-[850px] max-w-[95vw] max-h-[95vh] border border-white/5"
       >
-        <div
-          ref={headerRef}
-          className="flex items-center justify-between border-b border-gray-700"
-          style={{ padding: `${ui.headerPaddingY}px ${ui.headerPaddingX}px` }}
-        >
-          <div className="text-gray-300" style={{ fontSize: ui.headerFontSize }}>JOY 3D 编辑器</div>
+        {/* Header */}
+        <div className="flex items-center justify-between px-10 py-8">
+          <div className="text-[32px] font-bold text-white tracking-tight">JOY 3D 渲染建模</div>
           <button
-            type="button"
-            className="text-gray-300 hover:text-white hover:bg-gray-700"
-            onClick={(e) => {
-              e.preventDefault()
-              e.stopPropagation()
-              onOpenChange(false)
-            }}
-            style={{
-              padding: `${Math.max(6, Math.round(ui.headerPaddingY * 0.75))}px ${ui.headerPaddingX}px`,
-              fontSize: ui.headerFontSize,
-              borderRadius: ui.radius,
-            }}
+            onClick={() => onOpenChange(false)}
+            className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all"
           >
-            关闭
+            <X className="w-6 h-6" />
           </button>
         </div>
 
-        <div className="w-full aspect-square shrink-0">
-          <iframe src="/three-editor/index.html" title="3D Editor" className="w-full h-full" />
-        </div>
+        <div className="flex-1 min-h-0 flex px-10 pb-10 gap-10">
+          {/* Left Panel: Controls */}
+          <div className="w-[480px] flex flex-col gap-8">
+            {/* Approved Models Section */}
+            <div className="flex flex-col gap-4">
+              <div className="text-base text-gray-400 font-bold ml-1">预审模型相片墙</div>
+              <div className="bg-[#1a1c22]/80 rounded-[24px] p-5 border border-white/5">
+                <div className="approved-grid">
+                  {isLoadingApprovedModels ? (
+                    <div className="text-sm text-gray-500">加载中...</div>
+                  ) : approvedModels.length ? (
+                    approvedModels.map((item) => (
+                      <button
+                        key={item.url}
+                        type="button"
+                        className="flex-shrink-0 flex flex-col items-center gap-2.5 p-2.5 rounded-[20px] border-2 transition-all border-transparent hover:bg-white/5"
+                        onClick={() => {
+                          const win = threeEditorIframeRef.current?.contentWindow
+                          if (!win) return
+                          win.postMessage({ type: 'three-editor-load-model', url: item.url }, '*')
+                        }}
+                      >
+                        <div className="w-[80px] h-[80px] rounded-[16px] bg-black overflow-hidden border border-white/5 flex items-center justify-center">
+                          <img src={item.preview} alt={item.name || '预审模型'} className="w-full h-full object-contain" />
+                        </div>
+                        <span className="text-[13px] font-bold text-gray-500">{item.name || ''}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="text-sm text-gray-500">暂无预审模型</div>
+                  )}
+                </div>
+              </div>
+            </div>
 
-        <div
-          ref={footerRef}
-          className="border-t border-gray-700 bg-[#1a1d24]"
-          style={{ padding: `${ui.footerPaddingY}px ${ui.footerPaddingX}px` }}
-        >
-          <div
-            className={isCompact ? 'flex flex-col' : 'flex items-center'}
-            style={{ gap: ui.gap }}
-          >
-            {renderPreviewUrl && (
-              <img
-                src={renderPreviewUrl}
-                alt="渲染预览"
-                className="object-cover border border-gray-600 flex-shrink-0"
-                style={{ width: ui.previewSize, height: ui.previewSize, borderRadius: ui.radius }}
+            {/* Light Section */}
+            <div className="flex flex-col gap-4">
+              <div className="text-base text-gray-400 font-bold ml-1">灯光</div>
+              <div className="bg-[#1a1c22]/80 rounded-[24px] p-5 border border-white/5">
+                <div className="light-buttons">
+                  {LIGHT_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      className={`flex-1 py-3.5 rounded-[16px] text-sm font-bold transition-all ${
+                        selectedLight === opt.value ? 'bg-[#3a3a4a] text-[#b7affe] border border-[#b7affe]/30' : 'bg-[#25262b] text-gray-500 hover:text-gray-400'
+                      }`}
+                      onClick={() => {
+                        setSelectedLight(opt.value)
+                        const win = threeEditorIframeRef.current?.contentWindow
+                        if (!win) return
+                        const level = opt.value === '强对比' ? 'strong' : opt.value === '常规' ? 'normal' : 'weak'
+                        win.postMessage({ type: 'three-editor-set-contrast', level }, '*')
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Panel: Preview/Iframe */}
+          <div className="flex-1 flex flex-col gap-8">
+            <div className="flex-1 bg-black/40 rounded-[40px] overflow-hidden flex items-center justify-center relative border border-white/5">
+              <iframe
+                ref={threeEditorIframeRef}
+                src="/three-editor/index.html"
+                title="3D Editor"
+                className={`w-full h-full ${renderPreviewUrl ? 'absolute inset-0 opacity-0 pointer-events-none' : 'opacity-80'}`}
               />
-            )}
-            <div
-              className={isCompact ? 'flex flex-col w-full' : 'flex items-center flex-1 min-w-0'}
-              style={{ gap: ui.gap }}
-            >
-              <input
-                ref={inputRef}
-                type="text"
-                value={threePrompt}
-                onChange={(e) => onThreePromptChange(e.target.value)}
-                onKeyDown={(e) => {
-                  e.stopPropagation()
-                  if (e.key === 'Enter') onGenerate()
-                }}
-                placeholder={renderFilePath ? '输入描述，然后点击生成' : '请先点击上方的开始渲染按钮'}
-                className="flex-1 bg-[#2b2d33] text-white border border-gray-600 focus:border-purple-500 focus:outline-none placeholder:text-gray-500 min-w-0"
-                style={{
-                  height: ui.controlHeight,
-                  paddingLeft: ui.controlPaddingX,
-                  paddingRight: ui.controlPaddingX,
-                  borderRadius: ui.radius,
-                  fontSize: ui.controlFontSize,
-                }}
-              />
+              {renderPreviewUrl ? (
+                <img
+                  src={renderPreviewUrl}
+                  alt="Preview"
+                  className="max-w-[90%] max-h-[90%] object-contain drop-shadow-[0_20px_50px_rgba(0,0,0,0.5)]"
+                />
+              ) : null}
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex gap-5">
               <button
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  onGenerate()
+                onClick={() => {
+                  const win = threeEditorIframeRef.current?.contentWindow
+                  if (!win) return
+                  win.postMessage({ type: 'three-editor-hq-render-default' }, '*')
                 }}
-                disabled={!renderFilePath || !threePrompt.trim() || isLoading}
-                className="bg-gradient-to-r from-[#d580ff] to-[#a6ccfd] text-white font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
-                style={{
-                  height: ui.controlHeight,
-                  paddingLeft: ui.buttonPaddingX,
-                  paddingRight: ui.buttonPaddingX,
-                  borderRadius: ui.radius,
-                  fontSize: ui.controlFontSize,
-                }}
+                disabled={isLoading}
+                className={`flex-1 h-[72px] rounded-[24px] font-bold text-xl transition-all flex items-center justify-center gap-3 ${
+                  !isLoading 
+                  ? 'bg-[#3a3a4a] text-[#b7affe] border-2 border-[#b7affe]/30 hover:bg-[#4a4964]' 
+                  : 'bg-white/5 text-gray-600 border-2 border-transparent cursor-not-allowed'
+                }`}
               >
-                {isLoading ? '生成中...' : '生成'}
+                {isLoading ? '渲染中...' : '渲染'}
+              </button>
+              <button
+                className={`flex-1 h-[72px] rounded-[24px] font-bold text-xl transition-all flex items-center justify-center gap-3 ${
+                  renderPreviewUrl
+                  ? 'bg-gradient-to-r from-[#b7affe] to-[#a6ccfd] text-[#16171d] shadow-[0_10px_30px_rgba(183,175,254,0.3)] hover:scale-[1.02] active:scale-[0.98]'
+                  : 'bg-white/5 text-gray-600 cursor-not-allowed'
+                }`}
+              >
+                下载
               </button>
             </div>
           </div>
-          <div className="text-gray-500" style={{ fontSize: ui.hintFontSize, marginTop: Math.round(ui.gap * 0.6) }}>
-            {renderFilePath ? '✓ 渲染图已准备好，输入描述后点击生成' : '⚠ 请先在编辑器中点击开始渲染按钮'}
-          </div>
         </div>
+
+        <style>{`
+          .approved-grid {
+            display: flex;
+            gap: 1rem;
+            overflow-x: auto;
+            padding-bottom: 0.5rem;
+          }
+          .approved-grid::-webkit-scrollbar {
+            height: 4px;
+            width: 4px;
+          }
+          .approved-grid::-webkit-scrollbar-track {
+            background: transparent;
+          }
+          .approved-grid::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+          }
+          .approved-grid::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+          }
+          .light-buttons {
+            display: flex;
+            gap: 0.75rem;
+          }
+          .custom-scrollbar::-webkit-scrollbar {
+            height: 4px;
+            width: 4px;
+          }
+          .custom-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+          }
+          .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+          }
+          .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+          }
+        `}</style>
       </div>
     </div>
   )
