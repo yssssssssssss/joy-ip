@@ -312,6 +312,17 @@ export default function TwoDEditorModal({
             {/* Action Buttons */}
             <div className="flex gap-5">
               <button
+                onClick={handleDownload}
+                disabled={!previewUrl}
+                className={`flex-1 h-[72px] rounded-[24px] font-bold text-xl transition-all flex items-center justify-center gap-3 ${
+                  previewUrl
+                  ? 'bg-[#3a3a4a] text-[#b7affe] border-2 border-[#b7affe]/30 hover:bg-[#4a4964]' 
+                  : 'bg-white/5 text-gray-600 border-2 border-transparent cursor-not-allowed'
+                }`}
+              >
+                下载
+              </button>
+              <button
                 onClick={() => {
                   if (!previewUrl || !baseImageUrl) return
                   onUse({ previewUrl, baseImageUrl })
@@ -320,22 +331,11 @@ export default function TwoDEditorModal({
                 disabled={!previewUrl || !baseImageUrl || isComposing}
                 className={`flex-1 h-[72px] rounded-[24px] font-bold text-xl transition-all flex items-center justify-center gap-3 ${
                   previewUrl && baseImageUrl && !isComposing 
-                  ? 'bg-[#3a3a4a] text-[#b7affe] border-2 border-[#b7affe]/30 hover:bg-[#4a4964]' 
-                  : 'bg-white/5 text-gray-600 border-2 border-transparent cursor-not-allowed'
-                }`}
-              >
-                {isComposing ? '拼装中...' : '使用'}
-              </button>
-              <button
-                onClick={handleDownload}
-                disabled={!previewUrl}
-                className={`flex-1 h-[72px] rounded-[24px] font-bold text-xl transition-all flex items-center justify-center gap-3 ${
-                  previewUrl
                   ? 'bg-gradient-to-r from-[#b7affe] to-[#a6ccfd] text-[#16171d] shadow-[0_10px_30px_rgba(183,175,254,0.3)] hover:scale-[1.02] active:scale-[0.98]'
                   : 'bg-white/5 text-gray-600 cursor-not-allowed'
                 }`}
               >
-                下载
+                {isComposing ? '拼装中...' : '使用'}
               </button>
             </div>
           </div>

@@ -863,6 +863,7 @@ export default function ChatInterface() {
         setThreeDPreviewUrl(null)
         setThreeDBaseImageUrl(null)
         setGenerationMode('3D')
+        setThreeModalOpen(false)
       } else if (data.type === 'three-editor-hq-saved') {
         console.log('[3D Editor] 收到保存完成', data)
         const savedUrl = data.previewUrl || data.url || null
@@ -871,6 +872,7 @@ export default function ChatInterface() {
         setThreeDPreviewUrl(null)
         setThreeDBaseImageUrl(savedUrl)
         setGenerationMode('3D')
+        setThreeModalOpen(false)
       }
     }
     window.addEventListener('message', onMessage)

@@ -30,6 +30,7 @@ export default function ThreeEditorModal({
 }: ThreeEditorModalProps) {
   const [selectedLight, setSelectedLight] = useState<string>('弱对比')
   const [approvedModels, setApprovedModels] = useState<ApprovedModel[]>([])
+  const [selectedModelUrl, setSelectedModelUrl] = useState<string | null>(null)
   const [isLoadingApprovedModels, setIsLoadingApprovedModels] = useState(false)
   const threeEditorIframeRef = useRef<HTMLIFrameElement | null>(null)
 
@@ -50,9 +51,16 @@ export default function ThreeEditorModal({
         const resp = await fetch('/three-editor/approved-models.json', { cache: 'no-store' })
         if (!resp.ok) throw new Error('加载预审模型失败')
         const list = await resp.json()
-        setApprovedModels(Array.isArray(list) ? list : [])
+        if (Array.isArray(list)) {
+          setApprovedModels(list)
+          setSelectedModelUrl(list[0]?.url ?? null)
+        } else {
+          setApprovedModels([])
+          setSelectedModelUrl(null)
+        }
       } catch {
         setApprovedModels([])
+        setSelectedModelUrl(null)
       } finally {
         setIsLoadingApprovedModels(false)
       }
@@ -77,6 +85,23 @@ export default function ThreeEditorModal({
     }
     return () => iframe?.removeEventListener('load', handleLoad)
   }, [open, selectedLight])
+
+  useEffect(() => {
+    if (!open || !selectedModelUrl) return
+    const handleLoadModel = () => {
+      const win = threeEditorIframeRef.current?.contentWindow
+      if (!win) return
+      win.postMessage({ type: 'three-editor-load-model', url: selectedModelUrl }, '*')
+    }
+    const iframe = threeEditorIframeRef.current
+    if (iframe) {
+      iframe.addEventListener('load', handleLoadModel)
+      if (iframe.contentDocument?.readyState === 'complete') {
+        handleLoadModel()
+      }
+    }
+    return () => iframe?.removeEventListener('load', handleLoadModel)
+  }, [open, selectedModelUrl])
 
   if (!open) return null
 
@@ -115,11 +140,11 @@ export default function ThreeEditorModal({
                       <button
                         key={item.url}
                         type="button"
-                        className="flex-shrink-0 flex flex-col items-center gap-2.5 p-2.5 rounded-[20px] border-2 transition-all border-transparent hover:bg-white/5"
+                        className={`flex-shrink-0 flex flex-col items-center gap-2.5 p-2.5 rounded-[20px] border-2 transition-all hover:bg-white/5 ${
+                          selectedModelUrl === item.url ? 'border-[#b7affe]/60 bg-white/5' : 'border-transparent'
+                        }`}
                         onClick={() => {
-                          const win = threeEditorIframeRef.current?.contentWindow
-                          if (!win) return
-                          win.postMessage({ type: 'three-editor-load-model', url: item.url }, '*')
+                          setSelectedModelUrl(item.url)
                         }}
                       >
                         <div className="w-[80px] h-[80px] rounded-[16px] bg-black overflow-hidden border border-white/5 flex items-center justify-center">
@@ -184,21 +209,6 @@ export default function ThreeEditorModal({
             <div className="flex gap-5">
               <button
                 onClick={() => {
-                  const win = threeEditorIframeRef.current?.contentWindow
-                  if (!win) return
-                  win.postMessage({ type: 'three-editor-hq-render-default' }, '*')
-                }}
-                disabled={isLoading}
-                className={`flex-1 h-[72px] rounded-[24px] font-bold text-xl transition-all flex items-center justify-center gap-3 ${
-                  !isLoading 
-                  ? 'bg-[#3a3a4a] text-[#b7affe] border-2 border-[#b7affe]/30 hover:bg-[#4a4964]' 
-                  : 'bg-white/5 text-gray-600 border-2 border-transparent cursor-not-allowed'
-                }`}
-              >
-                {isLoading ? '渲染中...' : '渲染'}
-              </button>
-              <button
-                onClick={() => {
                   if (!renderPreviewUrl) return
                   const a = document.createElement('a')
                   a.href = renderPreviewUrl
@@ -207,11 +217,26 @@ export default function ThreeEditorModal({
                 }}
                 className={`flex-1 h-[72px] rounded-[24px] font-bold text-xl transition-all flex items-center justify-center gap-3 ${
                   renderPreviewUrl
+                  ? 'bg-[#3a3a4a] text-[#b7affe] border-2 border-[#b7affe]/30 hover:bg-[#4a4964]' 
+                  : 'bg-white/5 text-gray-600 border-2 border-transparent cursor-not-allowed'
+                }`}
+              >
+                下载
+              </button>
+              <button
+                onClick={() => {
+                  const win = threeEditorIframeRef.current?.contentWindow
+                  if (!win) return
+                  win.postMessage({ type: 'three-editor-hq-render-default' }, '*')
+                }}
+                disabled={isLoading}
+                className={`flex-1 h-[72px] rounded-[24px] font-bold text-xl transition-all flex items-center justify-center gap-3 ${
+                  !isLoading 
                   ? 'bg-gradient-to-r from-[#b7affe] to-[#a6ccfd] text-[#16171d] shadow-[0_10px_30px_rgba(183,175,254,0.3)] hover:scale-[1.02] active:scale-[0.98]'
                   : 'bg-white/5 text-gray-600 cursor-not-allowed'
                 }`}
               >
-                下载
+                {isLoading ? '生成中...' : '使用'}
               </button>
             </div>
           </div>
