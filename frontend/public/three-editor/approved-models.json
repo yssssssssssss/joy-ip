@@ -18,5 +18,45 @@
     "name": "坐姿2",
     "url": "/three-editor/assets/models/Joy_sit_hi.glb",
     "preview": "/three-editor/assets/previews/joy_sit_hi.png"
+  },
+  {
+    "name": "漂浮1",
+    "url": "/three-editor/assets/models/Joy_float_1.glb",
+    "preview": "/three-editor/assets/previews/Joy_float_1.png"
+  },
+  {
+    "name": "漂浮2",
+    "url": "/three-editor/assets/models/Joy_float_2.glb",
+    "preview": "/three-editor/assets/previews/Joy_float_2.png"
+  },
+  {
+    "name": "叉腰",
+    "url": "/three-editor/assets/models/Joy_handsonhips.glb",
+    "preview": "/three-editor/assets/previews/Joy_handsonhips.png"
+  },
+  {
+    "name": "举手",
+    "url": "/three-editor/assets/models/Joy_handsup.glb",
+    "preview": "/three-editor/assets/previews/Joy_handsup.png"
+  },
+  {
+    "name": "举手跑",
+    "url": "/three-editor/assets/models/Joy_handsup_run.glb",
+    "preview": "/three-editor/assets/previews/Joy_handsup_run.png"
+  },
+  {
+    "name": "抬头",
+    "url": "/three-editor/assets/models/Joy_headup.glb",
+    "preview": "/three-editor/assets/previews/Joy_headup.png"
+  },
+  {
+    "name": "点赞",
+    "url": "/three-editor/assets/models/Joy_like.glb",
+    "preview": "/three-editor/assets/previews/Joy_like.png"
+  },
+  {
+    "name": "倾斜",
+    "url": "/three-editor/assets/models/Joy_tilt.glb",
+    "preview": "/three-editor/assets/previews/Joy_tilt.png"
   }
 ]
