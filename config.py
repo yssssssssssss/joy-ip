@@ -57,6 +57,13 @@ class Config:
     FRONTEND_BUILD_DIR: str = os.environ.get('FRONTEND_BUILD_DIR', 'frontend_dist')
     
     # =========================
+    # 公告配置（热更新）
+    # =========================
+    NOTICE_META_FILE: str = os.environ.get('NOTICE_META_FILE', 'data/notice.meta.json')
+    NOTICE_CONTENT_FILE: str = os.environ.get('NOTICE_CONTENT_FILE', 'data/notice.md')
+    NOTICE_ADMIN_TOKEN: str = os.environ.get('NOTICE_ADMIN_TOKEN', '')
+    
+    # =========================
     # CORS 配置
     # =========================
     CORS_ENABLED: bool = os.environ.get('CORS_ENABLED', 'false').lower() == 'true'

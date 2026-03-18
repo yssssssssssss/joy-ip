@@ -1,9 +1,9 @@
 "use client"
 
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X } from 'lucide-react'
-import { NOTICE_CONFIG } from '@/lib/noticeConfig'
+import { NOTICE_CONFIG, type NoticeConfig, fetchNoticeConfig } from '@/lib/noticeConfig'
 
 /**
  * 简单的 Markdown 解析器
@@ -13,23 +13,17 @@ const parseMarkdown = (text: string) => {
     return text
         .split('\n')
         .map((line, index) => {
-            // 标题 ###
             if (line.startsWith('### ')) {
                 return <h3 key={index} className="text-lg font-bold mt-4 mb-2 text-white/90">{line.replace('### ', '')}</h3>
             }
-            // 列表 -
             if (line.startsWith('- ')) {
                 return <li key={index} className="ml-4 mb-1 text-white/70 list-disc">{line.replace('- ', '')}</li>
             }
-            // 空行
             if (line.trim() === '') {
                 return <div key={index} className="h-2" />
             }
 
-            // 处理行内样式：粗体 **text** 和 斜体 *text*
             let content: React.ReactNode = line
-
-            // 粗体
             const boldRegex = /\*\*(.*?)\*\*/g
             const parts = line.split(boldRegex)
             if (parts.length > 1) {
@@ -38,7 +32,6 @@ const parseMarkdown = (text: string) => {
                 )
             }
 
-            // 斜体 (简单处理)
             if (typeof content === 'string' && content.startsWith('*') && content.endsWith('*')) {
                 content = <em className="text-white/50 italic">{content.slice(1, -1)}</em>
             }
@@ -48,47 +41,61 @@ const parseMarkdown = (text: string) => {
 }
 
 export default function NoticeModal() {
+    const [noticeConfig, setNoticeConfig] = useState<NoticeConfig>(NOTICE_CONFIG)
     const [isOpen, setIsOpen] = useState(false)
     const [progress, setProgress] = useState(100)
+
     const timerRef = useRef<NodeJS.Timeout | null>(null)
     const progressRef = useRef<NodeJS.Timeout | null>(null)
+    const noticeVersionRef = useRef(NOTICE_CONFIG.version)
+
+    const closeNotice = useCallback((version: string) => {
+        setIsOpen(false)
+        localStorage.setItem('notice_version', version)
+        if (timerRef.current) clearTimeout(timerRef.current)
+        if (progressRef.current) clearInterval(progressRef.current)
+    }, [])
 
     useEffect(() => {
-        // 1. 检查是否开启了“预览模式”（每次刷新都显示）
-        const isAlwaysShow = NOTICE_CONFIG.alwaysShow
+        let cancelled = false
 
-        // 2. 检查是否已看过该版本的公告
-        const lastSeenVersion = localStorage.getItem('notice_version')
-        const isNewVersion = lastSeenVersion !== NOTICE_CONFIG.version
+        const initNotice = async () => {
+            const remoteConfig = await fetchNoticeConfig()
+            if (cancelled) return
 
-        // 只要满足其中之一就弹出
-        if (isAlwaysShow || isNewVersion) {
+            setNoticeConfig(remoteConfig)
+            noticeVersionRef.current = remoteConfig.version
+
+            const lastSeenVersion = localStorage.getItem('notice_version')
+            const isNewVersion = lastSeenVersion !== remoteConfig.version
+            const shouldShow = remoteConfig.alwaysShow || isNewVersion
+
+            if (!shouldShow) return
+
             setIsOpen(true)
+            setProgress(100)
 
-            // 10秒后自动关闭
             timerRef.current = setTimeout(() => {
-                handleClose()
-            }, NOTICE_CONFIG.duration)
+                closeNotice(remoteConfig.version)
+            }, remoteConfig.duration)
 
-            // 进度条动画
-            const step = 100 / (NOTICE_CONFIG.duration / 100)
+            const step = 100 / (remoteConfig.duration / 100)
             progressRef.current = setInterval(() => {
                 setProgress(prev => Math.max(0, prev - step))
             }, 100)
         }
 
+        initNotice()
+
         return () => {
+            cancelled = true
             if (timerRef.current) clearTimeout(timerRef.current)
             if (progressRef.current) clearInterval(progressRef.current)
         }
-    }, [])
+    }, [closeNotice])
 
     const handleClose = () => {
-        setIsOpen(false)
-        // 只有在关闭时，才记录当前版本号，标记为“已看过”
-        localStorage.setItem('notice_version', NOTICE_CONFIG.version)
-        if (timerRef.current) clearTimeout(timerRef.current)
-        if (progressRef.current) clearInterval(progressRef.current)
+        closeNotice(noticeVersionRef.current)
     }
 
     return (
@@ -101,7 +108,6 @@ export default function NoticeModal() {
                         exit={{ opacity: 0, scale: 0.9, y: 20 }}
                         className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-white/10 bg-[#1A1A1A]/90 shadow-2xl shadow-black/50"
                     >
-                        {/* 顶部进度条 */}
                         <div className="absolute top-0 left-0 h-1 bg-blue-500/50 w-full">
                             <motion.div
                                 className="h-full bg-blue-500"
@@ -109,7 +115,6 @@ export default function NoticeModal() {
                             />
                         </div>
 
-                        {/* 关闭按钮 */}
                         <button
                             onClick={handleClose}
                             className="absolute top-4 right-4 p-1 rounded-full hover:bg-white/10 transition-colors text-white/50 hover:text-white"
@@ -117,15 +122,14 @@ export default function NoticeModal() {
                             <X size={20} />
                         </button>
 
-                        {/* 内容区 */}
                         <div className="p-8 pt-10">
                             <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-2">
                                 <span className="w-2 h-6 bg-blue-500 rounded-full" />
-                                {NOTICE_CONFIG.title}
+                                {noticeConfig.title}
                             </h2>
 
                             <div className="max-h-[60vh] overflow-y-auto pr-2 custom-scrollbar">
-                                {parseMarkdown(NOTICE_CONFIG.content)}
+                                {parseMarkdown(noticeConfig.content)}
                             </div>
 
                             <div className="mt-8 flex justify-end">

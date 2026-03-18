@@ -13,7 +13,7 @@ import re
 import threading
 import time
 import uuid
-from typing import Dict
+from typing import Dict, Any
 
 from flask import Flask, request, jsonify, send_from_directory, g
 from flask_cors import CORS
@@ -766,6 +766,235 @@ def _prefer_preview_images(image_paths):
         preview = _maybe_preview_path_from_base_image(str(p))
         out.append(preview or p)
     return out
+
+
+DEFAULT_NOTICE_META = {
+    "title": "系统公告",
+    "duration": 100000,
+    "version": "1.0.1",
+    "alwaysShow": True,
+}
+
+DEFAULT_NOTICE_CONTENT = """
+欢迎使用 **JoyIP AI创作平台**！
+
+### 重点关注
+- 公告正文改为 Markdown 文件，编辑更直观
+- 如需让已读用户再次看到公告，请递增 version 字段
+
+### 温馨提示
+- `data/notice.md` 用于维护正文内容
+- `data/notice.meta.json` 用于维护标题与版本等元信息
+""".strip()
+
+
+def _resolve_notice_meta_file_path() -> str:
+    path = str(getattr(config, 'NOTICE_META_FILE', '') or '').strip()
+    if not path:
+        path = 'data/notice.meta.json'
+    if os.path.isabs(path):
+        return path
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, path)
+
+
+def _resolve_notice_content_file_path() -> str:
+    path = str(getattr(config, 'NOTICE_CONTENT_FILE', '') or '').strip()
+    if not path:
+        path = 'data/notice.md'
+    if os.path.isabs(path):
+        return path
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, path)
+
+
+def _ensure_parent_dir(file_path: str) -> None:
+    parent_dir = os.path.dirname(file_path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
+
+def _normalize_notice_meta(payload: Any) -> Dict[str, Any]:
+    result = dict(DEFAULT_NOTICE_META)
+
+    if not isinstance(payload, dict):
+        return result
+
+    title = payload.get('title')
+    if isinstance(title, str) and title.strip():
+        result['title'] = title.strip()
+
+    duration = payload.get('duration')
+    if isinstance(duration, (int, float)):
+        result['duration'] = max(1000, min(int(duration), 3600000))
+
+    version = payload.get('version')
+    if isinstance(version, str) and version.strip():
+        result['version'] = version.strip()
+
+    always_show = payload.get('alwaysShow')
+    if isinstance(always_show, bool):
+        result['alwaysShow'] = always_show
+
+    return result
+
+
+def _normalize_notice_config(payload: Any) -> Dict[str, Any]:
+    result = dict(DEFAULT_NOTICE_META)
+    result['content'] = DEFAULT_NOTICE_CONTENT
+
+    if not isinstance(payload, dict):
+        return result
+
+    result.update(_normalize_notice_meta(payload))
+
+    content = payload.get('content')
+    if isinstance(content, str) and content.strip():
+        result['content'] = content
+
+    return result
+
+
+def _read_notice_meta() -> Dict[str, Any]:
+    meta_path = _resolve_notice_meta_file_path()
+    try:
+        if not os.path.exists(meta_path):
+            _write_notice_meta(DEFAULT_NOTICE_META)
+            return dict(DEFAULT_NOTICE_META)
+
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            return _normalize_notice_meta(json.load(f))
+    except Exception as e:
+        logger.warning(f"加载公告元信息失败，使用默认值: {e}")
+        return dict(DEFAULT_NOTICE_META)
+
+
+def _read_notice_content() -> str:
+    content_path = _resolve_notice_content_file_path()
+    try:
+        if not os.path.exists(content_path):
+            _write_notice_content(DEFAULT_NOTICE_CONTENT)
+            return DEFAULT_NOTICE_CONTENT
+
+        with open(content_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return content if content.strip() else DEFAULT_NOTICE_CONTENT
+    except Exception as e:
+        logger.warning(f"加载公告正文失败，使用默认值: {e}")
+        return DEFAULT_NOTICE_CONTENT
+
+
+def _write_notice_meta(meta_data: Dict[str, Any]) -> None:
+    meta_path = _resolve_notice_meta_file_path()
+    _ensure_parent_dir(meta_path)
+    safe_meta = _normalize_notice_meta(meta_data)
+
+    temp_path = f"{meta_path}.tmp"
+    with open(temp_path, 'w', encoding='utf-8') as f:
+        json.dump(safe_meta, f, ensure_ascii=False, indent=2)
+    os.replace(temp_path, meta_path)
+
+
+def _write_notice_content(content: str) -> None:
+    content_path = _resolve_notice_content_file_path()
+    _ensure_parent_dir(content_path)
+    safe_content = content if isinstance(content, str) and content.strip() else DEFAULT_NOTICE_CONTENT
+
+    temp_path = f"{content_path}.tmp"
+    with open(temp_path, 'w', encoding='utf-8') as f:
+        f.write(safe_content)
+    os.replace(temp_path, content_path)
+
+
+def _load_notice_config() -> Dict[str, Any]:
+    meta = _read_notice_meta()
+    content = _read_notice_content()
+    payload = dict(meta)
+    payload['content'] = content
+    return _normalize_notice_config(payload)
+
+
+def _save_notice_config(notice_data: Dict[str, Any]) -> None:
+    safe_data = _normalize_notice_config(notice_data)
+    _write_notice_meta({
+        'title': safe_data['title'],
+        'duration': safe_data['duration'],
+        'version': safe_data['version'],
+        'alwaysShow': safe_data['alwaysShow'],
+    })
+    _write_notice_content(safe_data['content'])
+
+
+def _extract_notice_admin_token() -> str:
+    bearer = (request.headers.get('Authorization') or '').strip()
+    if bearer.lower().startswith('bearer '):
+        token = bearer[7:].strip()
+        if token:
+            return token
+    return (request.headers.get('X-Notice-Admin-Token') or '').strip()
+
+
+@app.route('/api/notice', methods=['GET'])
+def get_notice():
+    """读取公告配置（热更新）。"""
+    try:
+        return jsonify({
+            'success': True,
+            'data': _load_notice_config()
+        })
+    except Exception as e:
+        logger.error(f"读取公告配置失败: {e}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': '读取公告配置失败'
+        }), 500
+
+
+@app.route('/api/notice', methods=['POST'])
+def update_notice():
+    """更新公告配置（需管理员 token）。"""
+    expected_token = (getattr(config, 'NOTICE_ADMIN_TOKEN', '') or '').strip()
+    if not expected_token:
+        return jsonify({
+            'success': False,
+            'error': 'NOTICE_ADMIN_TOKEN 未配置，已禁用在线更新接口'
+        }), 403
+
+    provided_token = _extract_notice_admin_token()
+    if provided_token != expected_token:
+        return jsonify({
+            'success': False,
+            'error': '无权限更新公告'
+        }), 401
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({
+            'success': False,
+            'error': '请求体必须是 JSON 对象'
+        }), 400
+
+    allowed_keys = {'title', 'content', 'duration', 'version', 'alwaysShow'}
+    current_notice = _load_notice_config()
+    updates = {k: v for k, v in payload.items() if k in allowed_keys}
+    merged_notice = {**current_notice, **updates}
+    normalized_notice = _normalize_notice_config(merged_notice)
+
+    try:
+        _save_notice_config(normalized_notice)
+        logger.info(f"公告配置已更新: version={normalized_notice['version']}")
+        return jsonify({
+            'success': True,
+            'data': normalized_notice
+        })
+    except Exception as e:
+        logger.error(f"更新公告配置失败: {e}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': '更新公告配置失败'
+        }), 500
+
+
 @app.route('/api/2d_assets', methods=['GET'])
 def list_2d_assets():
     """按视角/类型/动作列出 2D 素材（文件名排序）"""

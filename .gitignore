@@ -50,6 +50,9 @@ frontend/output/
 *.tmp
 *.bak
 .temp/
+project.tar.gz
+temp_package/
+.codex/
 
 # 测试覆盖率
 .coverage
